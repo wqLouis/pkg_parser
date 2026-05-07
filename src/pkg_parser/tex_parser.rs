@@ -176,7 +176,9 @@ impl Tex {
                 bcndecode::BcnDecoderFormat::RGBA,
             )
             .ok()?,
-            // mp4, rg88, r8 are kept as-is
+            // R8, RG88, and mp4 are kept in their native format.
+            // They will be uploaded with the correct GPU format (R8Unorm / Rg8Unorm)
+            // by the renderer, not expanded to RGBA here.
             "mp4" | "rg88" | "r8" => self.payload.clone(),
             _ => return None,
         };
