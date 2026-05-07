@@ -18,147 +18,138 @@ pub struct Tex {
 }
 
 impl Tex {
-    pub fn new(bytes: &Vec<u8>) -> Option<Tex> {
-        const MAGIC: usize = 8;
-        const SEP: i64 = 1;
-        const TEX_SIZE: usize = 4;
-
+    pub fn new(bytes: &[u8]) -> Option<Tex> {
         let mut buf = BufReader::new(Cursor::new(bytes));
-        let mut extension: String;
-        let is_lz4: bool;
 
-        let mut texv = [0u8; MAGIC]; // I have no idea what all this magic variables are
-        let mut texi = [0u8; MAGIC];
-        let mut texb = [0u8; MAGIC];
-        let mut size = [0u8; TEX_SIZE];
-        let mut dimension = [[0u8; TEX_SIZE]; 2]; // w h
-        let mut format = [0u8; TEX_SIZE];
-        let mut image_count = [0u8; TEX_SIZE];
-        let mut mipmap_count = [0u8; TEX_SIZE];
-        let mut lz4 = [0u8; TEX_SIZE];
-        let mut decompressed_size = [0u8; TEX_SIZE];
-        let mut payload: Vec<u8>;
+        // Read magic/version strings
+        let mut magic = [0u8; 8];
+        buf.read_exact(&mut magic).ok()?;
+        let texv = String::from_utf8_lossy(&magic).into_owned();
 
-        buf.read_exact(&mut texv).ok()?;
-        buf.seek_relative(SEP).ok()?;
-        buf.read_exact(&mut texi).ok()?;
-        buf.seek_relative(SEP).ok()?;
-        buf.read_exact(&mut format).ok()?;
-        buf.seek_relative(TEX_SIZE as i64).ok()?;
-        buf.read_exact(&mut dimension[0]).ok()?;
-        buf.read_exact(&mut dimension[1]).ok()?;
-        buf.seek_relative((TEX_SIZE * 3) as i64).ok()?;
-        buf.read_exact(&mut texb).ok()?;
-        buf.seek_relative(SEP).ok()?;
-        buf.read_exact(&mut image_count).ok()?;
-        buf.seek_relative((TEX_SIZE * 2) as i64).ok()?;
+        buf.seek_relative(1).ok()?;
+        buf.read_exact(&mut magic).ok()?;
+        let texi = String::from_utf8_lossy(&magic).into_owned();
 
-        if String::from_utf8_lossy(&texb) == "TEXB0004" {
-            buf.read_exact(&mut mipmap_count).ok()?;
+        // Format and dimensions
+        buf.seek_relative(1).ok()?;
+        let mut u32_buf = [0u8; 4];
+        buf.read_exact(&mut u32_buf).ok()?;
+        let format = u32::from_le_bytes(u32_buf);
+
+        buf.seek_relative(4).ok()?;
+        buf.read_exact(&mut u32_buf).ok()?;
+        let w = u32::from_le_bytes(u32_buf);
+        buf.read_exact(&mut u32_buf).ok()?;
+        let h = u32::from_le_bytes(u32_buf);
+
+        // Block magic
+        buf.seek_relative(12).ok()?;
+        buf.read_exact(&mut magic).ok()?;
+        let texb = String::from_utf8_lossy(&magic).into_owned();
+
+        // Image and mipmap count
+        buf.seek_relative(1).ok()?;
+        buf.read_exact(&mut u32_buf).ok()?;
+        let image_count = u32::from_le_bytes(u32_buf);
+
+        buf.seek_relative(8).ok()?;
+        let mut mipmap_count = 0u32;
+        if texb == "TEXB0004" {
+            buf.read_exact(&mut u32_buf).ok()?;
+            mipmap_count = u32::from_le_bytes(u32_buf);
         }
 
-        buf.seek_relative(MAGIC as i64).ok()?;
-        buf.read_exact(&mut lz4).ok()?;
-        buf.read_exact(&mut decompressed_size).ok()?;
-        buf.read_exact(&mut size).ok()?;
+        // LZ4 flag and sizes
+        buf.seek_relative(8).ok()?;
+        buf.read_exact(&mut u32_buf).ok()?;
+        let lz4 = u32::from_le_bytes(u32_buf) == 1;
+        buf.read_exact(&mut u32_buf).ok()?;
+        let decompressed_size = u32::from_le_bytes(u32_buf);
+        buf.read_exact(&mut u32_buf).ok()?;
+        let payload_size = u32::from_le_bytes(u32_buf);
 
-        is_lz4 = if u32::from_le_bytes(lz4) == 1 {
-            true
-        } else {
-            false
-        };
-
-        payload = vec![0u8; u32::from_le_bytes(size) as usize];
+        // Payload
+        let mut payload = vec![0u8; payload_size as usize];
         buf.read_exact(&mut payload).ok()?;
-        extension = match u32::from_le_bytes(format) {
-            0 => "raw".to_owned(),
-            7 => "dxt1".to_owned(),
-            4 | 6 => "dxt5".to_owned(),
-            8 => "rg88".to_owned(),
-            9 => "r8".to_owned(),
-            _ => "tex".to_owned(),
-        };
 
-        extension = if extension == "raw" {
-            Self::match_signature(&payload)
-        } else {
-            extension
+        // Determine extension (before LZ4 decompression — raw magic bytes live in the compressed payload)
+        let extension = match format {
+            0 => match_signature(&payload),
+            7 => "dxt1",
+            4 | 6 => "dxt5",
+            8 => "rg88",
+            9 => "r8",
+            _ => "tex",
         };
+        let extension = extension.to_owned();
 
-        if is_lz4 {
-            payload = lz4_flex::block::decompress(
-                &mut payload,
-                u32::from_le_bytes(decompressed_size) as usize,
-            )
-            .ok()?;
+        // Decompress if LZ4
+        if lz4 {
+            payload = lz4_flex::block::decompress(&payload, decompressed_size as usize).ok()?;
         }
 
         Some(Tex {
-            texv: String::from_utf8_lossy(&texv).into_owned(),
-            texi: String::from_utf8_lossy(&texi).into_owned(),
-            texb: String::from_utf8_lossy(&texb).into_owned(),
-            size: u32::from_le_bytes(size),
-            dimension: [
-                u32::from_le_bytes(dimension[0]),
-                u32::from_le_bytes(dimension[1]),
-            ],
-            image_count: u32::from_le_bytes(image_count),
-            mipmap_count: u32::from_le_bytes(mipmap_count),
-            lz4: is_lz4,
-            decompressed_size: u32::from_le_bytes(decompressed_size),
-            payload: payload,
-            extension: extension,
+            texv,
+            texi,
+            texb,
+            size: payload_size,
+            dimension: [w, h],
+            image_count,
+            mipmap_count,
+            lz4,
+            decompressed_size,
+            payload,
+            extension,
         })
     }
 
     pub fn parse_to_image(&self) -> Option<(Vec<u8>, String)> {
-        Some(match self.extension.as_str() {
-            "r8" => Self::raw_to_png(
-                self.payload.iter().flat_map(|&b| [b, b, b, 255]).collect(),
-                self.dimension[0],
-                self.dimension[1],
-            )?,
-            "rg88" => Self::raw_to_png(
-                self.payload
+        let (w, h) = (self.dimension[0], self.dimension[1]);
+
+        match self.extension.as_str() {
+            "r8" => {
+                let rgba: Vec<u8> = self.payload.iter().flat_map(|&b| [b, b, b, 255]).collect();
+                raw_to_png(rgba, w, h)
+            }
+            "rg88" => {
+                let rgba: Vec<u8> = self
+                    .payload
                     .windows(2)
                     .flat_map(|b| [b[0], b[0], b[0], b[1]])
-                    .collect(),
-                self.dimension[0],
-                self.dimension[1],
-            )?,
-            "dxt1" => Self::raw_to_png(
-                bcndecode::decode(
+                    .collect();
+                raw_to_png(rgba, w, h)
+            }
+            "dxt1" => {
+                let decoded = bcndecode::decode(
                     &self.payload,
-                    self.dimension[0] as usize,
-                    self.dimension[1] as usize,
+                    w as usize,
+                    h as usize,
                     bcndecode::BcnEncoding::Bc1,
                     bcndecode::BcnDecoderFormat::RGBA,
                 )
-                .unwrap(),
-                self.dimension[0],
-                self.dimension[1],
-            )?,
-            "dxt5" => Self::raw_to_png(
-                bcndecode::decode(
+                .ok()?;
+                raw_to_png(decoded, w, h)
+            }
+            "dxt5" => {
+                let decoded = bcndecode::decode(
                     &self.payload,
-                    self.dimension[0] as usize,
-                    self.dimension[1] as usize,
+                    w as usize,
+                    h as usize,
                     bcndecode::BcnEncoding::Bc3,
                     bcndecode::BcnDecoderFormat::RGBA,
                 )
-                .unwrap(),
-                self.dimension[0],
-                self.dimension[1],
-            )?,
-            "jpg" => (self.payload.clone(), "jpg".to_owned()),
-            "png" => (self.payload.clone(), "png".to_owned()),
-            "mp4" => (self.payload.clone(), "mp4".to_owned()),
-            _ => (self.payload.clone(), "tex".to_owned()),
-        })
+                .ok()?;
+                raw_to_png(decoded, w, h)
+            }
+            "jpg" | "png" | "mp4" => Some((self.payload.clone(), self.extension.clone())),
+            _ => None,
+        }
     }
 
     pub fn parse_to_rgba(&mut self) -> Option<()> {
-        let parsed = match self.extension.as_str() {
+        let (w, h) = (self.dimension[0] as usize, self.dimension[1] as usize);
+
+        self.payload = match self.extension.as_str() {
             "png" => image::load_from_memory_with_format(&self.payload, image::ImageFormat::Png)
                 .ok()?
                 .into_rgba8()
@@ -169,66 +160,50 @@ impl Tex {
                 .into_rgba8()
                 .as_raw()
                 .to_owned(),
-            "mp4" => self.payload.clone(),
-            "rg88" => self.payload.clone(),
-            "r8" => self.payload.clone(),
             "dxt1" => bcndecode::decode(
                 &self.payload,
-                self.dimension[0] as usize,
-                self.dimension[1] as usize,
+                w,
+                h,
                 bcndecode::BcnEncoding::Bc1,
                 bcndecode::BcnDecoderFormat::RGBA,
             )
             .ok()?,
             "dxt5" => bcndecode::decode(
                 &self.payload,
-                self.dimension[0] as usize,
-                self.dimension[1] as usize,
+                w,
+                h,
                 bcndecode::BcnEncoding::Bc3,
                 bcndecode::BcnDecoderFormat::RGBA,
             )
             .ok()?,
-            _ => {
-                return None;
-            }
+            // mp4, rg88, r8 are kept as-is
+            "mp4" | "rg88" | "r8" => self.payload.clone(),
+            _ => return None,
         };
-
-        self.payload = parsed;
 
         Some(())
     }
+}
 
-    fn match_signature(bytes: &Vec<u8>) -> String {
-        const PNG_SIG: ([u8; 8], &str) = ([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], "png");
-        const JPG_SIG: ([u8; 3], &str) = ([0xff, 0xd8, 0xff], "jpg");
-        const MP4_SIG: ([u8; 4], &str) = ([0x66, 0x74, 0x79, 0x70], "mp4");
-        const PADDED_BITS: usize = 16;
-
-        let mut padded_arr = [0u8; PADDED_BITS];
-        let payload_len = std::cmp::min(PADDED_BITS, bytes.len());
-
-        padded_arr[..payload_len].copy_from_slice(&bytes[..payload_len]);
-
-        if padded_arr[..8] == PNG_SIG.0 {
-            return PNG_SIG.1.to_owned();
-        }
-        if padded_arr[..3] == JPG_SIG.0 {
-            return JPG_SIG.1.to_owned();
-        }
-        if padded_arr[4..8] == MP4_SIG.0 {
-            return MP4_SIG.1.to_owned();
-        }
-
-        "tex".to_owned()
+/// Detect embedded image format from magic bytes.
+fn match_signature(bytes: &[u8]) -> &str {
+    if bytes.len() >= 8 && bytes[..8] == [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A] {
+        return "png";
     }
-
-    fn raw_to_png(bytes: Vec<u8>, w: u32, h: u32) -> Option<(Vec<u8>, String)> {
-        let mut buf: Vec<u8> = Vec::new();
-        let mut cur = Cursor::new(&mut buf);
-
-        ImageBuffer::<Rgba<u8>, Vec<u8>>::from_raw(w, h, bytes.to_owned())?
-            .write_to(&mut cur, image::ImageFormat::Png)
-            .ok()?;
-        Some((buf, "png".to_owned()))
+    if bytes.len() >= 3 && bytes[..3] == [0xFF, 0xD8, 0xFF] {
+        return "jpg";
     }
+    if bytes.len() >= 8 && bytes[4..8] == [0x66, 0x74, 0x79, 0x70] {
+        return "mp4";
+    }
+    "tex"
+}
+
+fn raw_to_png(bytes: Vec<u8>, w: u32, h: u32) -> Option<(Vec<u8>, String)> {
+    let mut buf = Vec::new();
+    let mut cur = Cursor::new(&mut buf);
+    ImageBuffer::<Rgba<u8>, Vec<u8>>::from_raw(w, h, bytes)?
+        .write_to(&mut cur, image::ImageFormat::Png)
+        .ok()?;
+    Some((buf, "png".to_owned()))
 }

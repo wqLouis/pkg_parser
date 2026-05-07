@@ -36,76 +36,61 @@ impl Pkg {
     }
 
     fn read_header(file: &mut BufReader<File>) -> Header {
-        // Read the header of the pkg
+        let mut buf = [0u8; 4];
 
-        const HEADER_LEN: usize = 4;
-        const FILE_COUNT_LEN: usize = 4;
+        // Version string
+        file.read_exact(&mut buf).unwrap();
+        let version_len = u32::from_le_bytes(buf) as usize;
+        let mut version_bytes = vec![0u8; version_len];
+        file.read_exact(&mut version_bytes).unwrap();
+        let version = String::from_utf8(version_bytes).unwrap();
 
-        fn header_len(file: &mut BufReader<File>) -> u32 {
-            let mut header_len = [0u8; HEADER_LEN];
-            file.read_exact(&mut header_len).unwrap();
-            u32::from_le_bytes(header_len)
-        }
+        // File count
+        file.read_exact(&mut buf).unwrap();
+        let file_count = u32::from_le_bytes(buf);
 
-        fn header_version(file: &mut BufReader<File>, len: usize) -> String {
-            let mut header_v = vec![0u8; len];
-            file.read_exact(&mut header_v).unwrap();
-            String::from_utf8(header_v).unwrap()
-        }
-
-        fn file_count(file: &mut BufReader<File>) -> u32 {
-            let mut file_count = [0u8; FILE_COUNT_LEN];
-            file.read_exact(&mut file_count).unwrap();
-            u32::from_le_bytes(file_count)
-        }
-
-        let len = header_len(file);
-
-        Header {
-            version: header_version(file, len as usize),
-            file_count: file_count(file),
-        }
+        Header { version, file_count }
     }
 
     fn read_entries(file: &mut BufReader<File>, entry_count: u32) -> Vec<Entry> {
-        // Read the file entry of pkg
-
-        const PATH_LEN: usize = 4;
-        const DATA_OFFSET: usize = 4;
-        const DATA_SIZE: usize = 4;
-
-        let mut path_len = [0u8; PATH_LEN];
-        let mut entries = Vec::<Entry>::with_capacity(entry_count as usize);
+        let mut entries = Vec::with_capacity(entry_count as usize);
+        let mut buf = [0u8; 4];
 
         for _ in 0..entry_count {
-            file.read_exact(&mut path_len).unwrap();
+            // Path
+            file.read_exact(&mut buf).unwrap();
+            let path_len = u32::from_le_bytes(buf) as usize;
+            let mut path_bytes = vec![0u8; path_len];
+            file.read_exact(&mut path_bytes).unwrap();
 
-            let mut path_buffer = vec![0u8; u32::from_le_bytes(path_len) as usize];
-            let mut data_offset_buffer = [0u8; DATA_OFFSET];
-            let mut data_size_buffer = [0u8; DATA_SIZE];
-
-            file.read_exact(&mut path_buffer).unwrap();
-            file.read_exact(&mut data_offset_buffer).unwrap();
-            file.read_exact(&mut data_size_buffer).unwrap();
+            // Offset and size
+            file.read_exact(&mut buf).unwrap();
+            let offset = u32::from_le_bytes(buf);
+            file.read_exact(&mut buf).unwrap();
+            let size = u32::from_le_bytes(buf);
 
             entries.push(Entry {
-                path: String::from_utf8(path_buffer).unwrap(),
-                offset: u32::from_le_bytes(data_offset_buffer),
-                size: u32::from_le_bytes(data_size_buffer),
+                path: String::from_utf8(path_bytes).unwrap(),
+                offset,
+                size,
             });
         }
 
         entries
     }
 
-    fn read_files(file: &mut BufReader<File>, entries: &Vec<Entry>) -> HashMap<String, Vec<u8>> {
-        let mut map = HashMap::<String, Vec<u8>>::new();
-        let pos: u64 = file.stream_position().unwrap();
+    fn read_files(file: &mut BufReader<File>, entries: &[Entry]) -> HashMap<String, Vec<u8>> {
+        let data_start = file.stream_position().unwrap();
+        let mut map = HashMap::with_capacity(entries.len());
 
-        for entry in entries {
-            let mut buf = vec![0u8; entry.size as usize];
-            file.seek(SeekFrom::Start(entry.offset as u64 + pos))
+        // Sort by offset to read sequentially and avoid random seeking
+        let mut sorted: Vec<&Entry> = entries.iter().collect();
+        sorted.sort_by_key(|e| e.offset);
+
+        for entry in &sorted {
+            file.seek(SeekFrom::Start(entry.offset as u64 + data_start))
                 .unwrap();
+            let mut buf = vec![0u8; entry.size as usize];
             file.read_exact(&mut buf).unwrap();
             map.insert(entry.path.clone(), buf);
         }
@@ -113,27 +98,14 @@ impl Pkg {
         map
     }
 
-    pub fn save_pkg(&mut self, target: &Path, dry_run: bool, parse_tex: bool, verbose: bool) {
-        for (path, bytes) in self.files.iter() {
-            let mut path = target.join(path);
-            if !dry_run {
-                create_dir_all(path.parent().unwrap()).unwrap();
-            }
-            if path.extension().unwrap_or_default() == "tex" {
-                if !parse_tex & !dry_run {
-                    fs::write(path, bytes).unwrap();
+    pub fn save_pkg(&self, target: &Path, dry_run: bool, parse_tex: bool, verbose: bool) {
+        for (path, bytes) in &self.files {
+            let output_path = target.join(path);
+
+            if parse_tex && Path::new(path).extension().unwrap_or_default() == "tex" {
+                let Some(tex) = tex_parser::Tex::new(bytes) else {
+                    println!("failed to parse tex: {}", path);
                     continue;
-                }
-                let tex = tex_parser::Tex::new(bytes);
-                let tex = match tex {
-                    Some(val) => val,
-                    None => {
-                        println!(
-                            "failed to parse path: {} \n",
-                            path.to_str().unwrap_or_default()
-                        );
-                        continue;
-                    }
                 };
 
                 if verbose {
@@ -149,25 +121,22 @@ impl Pkg {
                     println!();
                 }
 
-                let parsed = tex.parse_to_image();
-                let parsed = match parsed {
-                    None => {
-                        println!(
-                            "failed to parse image: {}\n",
-                            path.to_str().unwrap_or_default()
-                        );
-                        continue;
-                    }
-                    Some(val) => val,
+                let Some((img_data, img_ext)) = tex.parse_to_image() else {
+                    println!("failed to parse image: {}", path);
+                    continue;
                 };
 
-                path.set_extension(&parsed.1);
-                if parse_tex & !dry_run {
-                    fs::write(path, parsed.0).unwrap();
+                let mut img_path = output_path;
+                img_path.set_extension(&img_ext);
+
+                if !dry_run {
+                    create_dir_all(img_path.parent().unwrap()).unwrap();
+                    fs::write(&img_path, &img_data).unwrap();
                 }
             } else {
                 if !dry_run {
-                    fs::write(path, bytes).unwrap();
+                    create_dir_all(output_path.parent().unwrap()).unwrap();
+                    fs::write(&output_path, bytes).unwrap();
                 }
             }
         }

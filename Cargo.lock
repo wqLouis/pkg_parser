@@ -241,15 +241,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
-name = "depkg"
-version = "1.2.0"
-dependencies = [
- "bcndecode",
- "image",
- "lz4_flex",
-]
-
-[[package]]
 name = "either"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -614,6 +605,15 @@ name = "pastey"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "35fb2e5f958ec131621fdd531e9fc186ed768cbe395337403ae56c17a74c68ec"
+
+[[package]]
+name = "pkg_parser"
+version = "1.2.0"
+dependencies = [
+ "bcndecode",
+ "image",
+ "lz4_flex",
+]
 
 [[package]]
 name = "png"
