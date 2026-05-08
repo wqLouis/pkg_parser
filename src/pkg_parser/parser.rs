@@ -13,10 +13,14 @@ pub struct Pkg {
     pub files: HashMap<String, Vec<u8>>,
 }
 
+/// Package file header containing metadata
 #[derive(Debug, Clone)]
-pub(self) struct Header {
-    version: String,
-    file_count: u32,
+pub struct Header {
+    /// Version string of the package
+    pub version: String,
+    /// Number of files in the package
+    #[allow(dead_code)]
+    pub file_count: u32,
 }
 
 pub(self) struct Entry {
