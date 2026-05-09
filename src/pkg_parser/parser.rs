@@ -5,7 +5,7 @@ use std::{
     path::Path,
 };
 
-use crate::pkg_parser::tex_parser;
+use crate::pkg_parser::{tex_parser, video_parser};
 
 #[derive(Debug, Clone)]
 pub struct Pkg {
@@ -102,11 +102,24 @@ impl Pkg {
         map
     }
 
-    pub fn save_pkg(&self, target: &Path, dry_run: bool, parse_tex: bool, verbose: bool) {
+    pub fn save_pkg(
+        &self,
+        target: &Path,
+        dry_run: bool,
+        parse_tex: bool,
+        parse_video: bool,
+        verbose: bool,
+    ) {
         for (path, bytes) in &self.files {
             let output_path = target.join(path);
+            let ext = Path::new(path)
+                .extension()
+                .unwrap_or_default()
+                .to_str()
+                .unwrap_or_default()
+                .to_lowercase();
 
-            if parse_tex && Path::new(path).extension().unwrap_or_default() == "tex" {
+            if parse_tex && ext == "tex" {
                 let Some(tex) = tex_parser::Tex::new(bytes) else {
                     println!("failed to parse tex: {}", path);
                     continue;
@@ -136,6 +149,51 @@ impl Pkg {
                 if !dry_run {
                     create_dir_all(img_path.parent().unwrap()).unwrap();
                     fs::write(&img_path, &img_data).unwrap();
+                }
+            } else if parse_video && matches!(ext.as_str(), "mp4" | "webm" | "gif") {
+                let Some(video) = video_parser::Video::new(bytes) else {
+                    println!("failed to parse video/gif: {}", path);
+                    continue;
+                };
+
+                if verbose {
+                    println!("Video/GIF:");
+                    println!("Format: {:?}", video.format);
+                    if let Some((w, h)) = video.dimensions {
+                        println!("Dimensions: {}x{}", w, h);
+                    }
+                    if let Some(count) = video.frame_count {
+                        println!("Frame count: {}", count);
+                    }
+                    println!();
+                }
+
+                if video.is_gif() && parse_video {
+                    // Save GIF as-is and also extract frames
+                    if !dry_run {
+                        create_dir_all(output_path.parent().unwrap()).unwrap();
+                        fs::write(&output_path, bytes).unwrap();
+                    }
+
+                    let stem = Path::new(path)
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_str()
+                        .unwrap_or("output");
+                    if let Some(frames) = video_parser::save_gif_frames(bytes, stem) {
+                        for (frame_data, suffix) in &frames {
+                            let frame_path = output_path.with_file_name(suffix);
+                            if !dry_run {
+                                fs::write(&frame_path, frame_data).unwrap();
+                            }
+                        }
+                    }
+                } else {
+                    // Save video/gif file as-is
+                    if !dry_run {
+                        create_dir_all(output_path.parent().unwrap()).unwrap();
+                        fs::write(&output_path, bytes).unwrap();
+                    }
                 }
             } else {
                 if !dry_run {

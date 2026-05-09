@@ -141,7 +141,7 @@ impl Tex {
                 .ok()?;
                 raw_to_png(decoded, w, h)
             }
-            "jpg" | "png" | "mp4" => Some((self.payload.clone(), self.extension.clone())),
+            "jpg" | "png" | "mp4" | "gif" => Some((self.payload.clone(), self.extension.clone())),
             _ => None,
         }
     }
@@ -176,10 +176,10 @@ impl Tex {
                 bcndecode::BcnDecoderFormat::RGBA,
             )
             .ok()?,
-            // R8, RG88, and mp4 are kept in their native format.
+            // R8, RG88, mp4, and gif are kept in their native format.
             // They will be uploaded with the correct GPU format (R8Unorm / Rg8Unorm)
             // by the renderer, not expanded to RGBA here.
-            "mp4" | "rg88" | "r8" => self.payload.clone(),
+            "mp4" | "gif" | "rg88" | "r8" => self.payload.clone(),
             _ => return None,
         };
 
@@ -197,6 +197,15 @@ fn match_signature(bytes: &[u8]) -> &str {
     }
     if bytes.len() >= 8 && bytes[4..8] == [0x66, 0x74, 0x79, 0x70] {
         return "mp4";
+    }
+    // GIF87a or GIF89a
+    if bytes.len() >= 6
+        && bytes[..3] == [0x47, 0x49, 0x46]
+        && (bytes[3] == 0x38)
+        && (bytes[4] == 0x37 || bytes[4] == 0x39)
+        && bytes[5] == 0x61
+    {
+        return "gif";
     }
     "tex"
 }
