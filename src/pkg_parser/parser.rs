@@ -124,122 +124,133 @@ impl Pkg {
                 .to_lowercase();
 
             if parse_tex && ext == "tex" {
-                let Some(tex) = tex_parser::Tex::new(bytes) else {
-                    log::warn!("failed to parse tex: {}", path);
-                    continue;
-                };
-
-                log::info!("Texture: {}", path);
-                log::debug!("  Texv: {}", tex.texv);
-                log::debug!("  Texi: {}", tex.texi);
-                log::debug!("  Texb: {}", tex.texb);
-                log::debug!("  Image count: {}", tex.image_count);
-                log::debug!("  Mipmap count: {}", tex.mipmap_count);
-                log::debug!("  Lz4 compressed: {}", tex.lz4);
-                log::debug!("  Texture size: {}", tex.size);
-                log::debug!("  w: {} h: {}", tex.dimension[0], tex.dimension[1]);
-
-                let Some((img_data, img_ext)) = tex.parse_to_image() else {
-                    log::warn!("failed to parse image: {}", path);
-                    continue;
-                };
-
-                let mut img_path = output_path;
-                img_path.set_extension(&img_ext);
-
-                if !dry_run {
-                    create_dir_all(img_path.parent().unwrap()).unwrap();
-                    fs::write(&img_path, &img_data).unwrap();
-                }
+                save_tex_file(path, bytes, &output_path, dry_run);
             } else if parse_video && matches!(ext.as_str(), "mp4" | "webm" | "gif") {
-                let Some(video) = video_parser::Video::new(bytes) else {
-                    log::warn!("failed to parse video/gif: {}", path);
-                    continue;
-                };
-
-                log::info!("Video/GIF: {}", path);
-                log::debug!("  Format: {:?}", video.format);
-                if let Some((w, h)) = video.dimensions {
-                    log::debug!("  Dimensions: {}x{}", w, h);
-                }
-                if let Some(count) = video.frame_count {
-                    log::debug!("  Frame count: {}", count);
-                }
-
-                if video.is_gif() && parse_video {
-                    // Save GIF as-is and also extract frames
-                    if !dry_run {
-                        create_dir_all(output_path.parent().unwrap()).unwrap();
-                        fs::write(&output_path, bytes).unwrap();
-                    }
-
-                    let stem = Path::new(path)
-                        .file_stem()
-                        .unwrap_or_default()
-                        .to_str()
-                        .unwrap_or("output");
-                    if let Some(frames) = video_parser::save_gif_frames(bytes, stem) {
-                        for (frame_data, suffix) in &frames {
-                            let frame_path = output_path.with_file_name(suffix);
-                            if !dry_run {
-                                fs::write(&frame_path, frame_data).unwrap();
-                            }
-                        }
-                    }
-                } else {
-                    // Save video/gif file as-is
-                    if !dry_run {
-                        create_dir_all(output_path.parent().unwrap()).unwrap();
-                        fs::write(&output_path, bytes).unwrap();
-                    }
-                }
+                save_video_file(path, bytes, &output_path, dry_run);
             } else if parse_mdl && ext == "mdl" {
-                let Some(mdl) = mdl_parser::MdlFile::new(bytes) else {
-                    log::warn!("failed to parse mdl: {}", path);
-                    if !dry_run {
-                        create_dir_all(output_path.parent().unwrap()).unwrap();
-                        fs::write(&output_path, bytes).unwrap();
-                    }
-                    continue;
-                };
+                save_mdl_file(path, bytes, &output_path, dry_run);
+            } else if !dry_run {
+                create_dir_all(output_path.parent().unwrap()).unwrap();
+                fs::write(&output_path, bytes).unwrap();
+            }
+        }
+    }
+}
 
-                log::info!("Puppet model: {}", path);
-                log::debug!(
-                    "  Records: {}, Triangles: {}",
-                    mdl.data.records.len(),
-                    mdl.data.triangles.len()
-                );
-                log::debug!(
-                    "  Bones: {}, Frames: {}",
-                    mdl.bones.bones.len(),
-                    mdl.animation.num_frames
-                );
+/// Process and save a .tex texture file.
+fn save_tex_file(path: &str, bytes: &[u8], output_path: &Path, dry_run: bool) {
+    let Some(tex) = tex_parser::Tex::new(bytes) else {
+        log::warn!("failed to parse tex: {}", path);
+        return;
+    };
 
-                // Write raw .mdl file
+    log::info!("Texture: {}", path);
+    log::debug!("  Texv: {}", tex.texv);
+    log::debug!("  Texi: {}", tex.texi);
+    log::debug!("  Texb: {}", tex.texb);
+    log::debug!("  Image count: {}", tex.image_count);
+    log::debug!("  Mipmap count: {}", tex.mipmap_count);
+    log::debug!("  Lz4 compressed: {}", tex.lz4);
+    log::debug!("  Texture size: {}", tex.size);
+    log::debug!("  w: {} h: {}", tex.dimension[0], tex.dimension[1]);
+
+    let Some((img_data, img_ext)) = tex.parse_to_image() else {
+        log::warn!("failed to parse image: {}", path);
+        return;
+    };
+
+    let mut img_path = output_path.to_path_buf();
+    img_path.set_extension(&img_ext);
+
+    if !dry_run {
+        create_dir_all(img_path.parent().unwrap()).unwrap();
+        fs::write(&img_path, &img_data).unwrap();
+    }
+}
+
+/// Process and save a video or GIF file.
+fn save_video_file(path: &str, bytes: &[u8], output_path: &Path, dry_run: bool) {
+    let Some(video) = video_parser::Video::new(bytes) else {
+        log::warn!("failed to parse video/gif: {}", path);
+        return;
+    };
+
+    log::info!("Video/GIF: {}", path);
+    log::debug!("  Format: {:?}", video.format);
+    if let Some((w, h)) = video.dimensions {
+        log::debug!("  Dimensions: {}x{}", w, h);
+    }
+    if let Some(count) = video.frame_count {
+        log::debug!("  Frame count: {}", count);
+    }
+
+    if video.is_gif() {
+        // Save GIF as-is and also extract frames
+        if !dry_run {
+            create_dir_all(output_path.parent().unwrap()).unwrap();
+            fs::write(output_path, bytes).unwrap();
+        }
+
+        let stem = Path::new(path)
+            .file_stem()
+            .unwrap_or_default()
+            .to_str()
+            .unwrap_or("output");
+        if let Some(frames) = video_parser::save_gif_frames(bytes, stem) {
+            for (frame_data, suffix) in &frames {
+                let frame_path = output_path.with_file_name(suffix);
                 if !dry_run {
-                    create_dir_all(output_path.parent().unwrap()).unwrap();
-                    fs::write(&output_path, bytes).unwrap();
-                }
-
-                // Write parsed JSON
-                match mdl.to_json() {
-                    Ok(json) => {
-                        let mut json_path = output_path.clone();
-                        json_path.set_extension("mdl.json");
-                        if !dry_run {
-                            fs::write(&json_path, &json).unwrap();
-                        }
-                    }
-                    Err(e) => {
-                        log::warn!("failed to serialize mdl json: {}: {}", path, e);
-                    }
-                }
-            } else {
-                if !dry_run {
-                    create_dir_all(output_path.parent().unwrap()).unwrap();
-                    fs::write(&output_path, bytes).unwrap();
+                    fs::write(&frame_path, frame_data).unwrap();
                 }
             }
+        }
+    } else if !dry_run {
+        // Save video/gif file as-is
+        create_dir_all(output_path.parent().unwrap()).unwrap();
+        fs::write(output_path, bytes).unwrap();
+    }
+}
+
+/// Process and save a .mdl puppet model file.
+fn save_mdl_file(path: &str, bytes: &[u8], output_path: &Path, dry_run: bool) {
+    let Some(mdl) = mdl_parser::MdlFile::new(bytes) else {
+        log::warn!("failed to parse mdl: {}", path);
+        if !dry_run {
+            create_dir_all(output_path.parent().unwrap()).unwrap();
+            fs::write(output_path, bytes).unwrap();
+        }
+        return;
+    };
+
+    log::info!("Puppet model: {}", path);
+    log::debug!(
+        "  Records: {}, Triangles: {}",
+        mdl.data.records.len(),
+        mdl.data.triangles.len()
+    );
+    log::debug!(
+        "  Bones: {}, Frames: {}",
+        mdl.bones.bones.len(),
+        mdl.animation.num_frames
+    );
+
+    // Write raw .mdl file
+    if !dry_run {
+        create_dir_all(output_path.parent().unwrap()).unwrap();
+        fs::write(output_path, bytes).unwrap();
+    }
+
+    // Write parsed JSON
+    match mdl.to_json() {
+        Ok(json) => {
+            let mut json_path = output_path.to_path_buf();
+            json_path.set_extension("mdl.json");
+            if !dry_run {
+                fs::write(&json_path, &json).unwrap();
+            }
+        }
+        Err(e) => {
+            log::warn!("failed to serialize mdl json: {}: {}", path, e);
         }
     }
 }

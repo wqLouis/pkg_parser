@@ -1,6 +1,20 @@
 use std::io::{BufReader, Cursor, Read, Seek};
 use serde::Serialize;
 
+/// Read a null-terminated UTF-8 string from a reader.
+fn read_cstring<R: Read>(reader: &mut R) -> Option<String> {
+    let mut bytes = Vec::new();
+    loop {
+        let mut byte = [0u8; 1];
+        reader.read_exact(&mut byte).ok()?;
+        if byte[0] == 0 {
+            break;
+        }
+        bytes.push(byte[0]);
+    }
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
 /// Parsed MDL (puppet model) file.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -157,16 +171,7 @@ impl MdlvHeader {
         reader.read_exact(&mut pad_byte).ok()?;
 
         // Material path at offset 21+
-        let mut path_bytes = Vec::new();
-        loop {
-            let mut byte = [0u8; 1];
-            reader.read_exact(&mut byte).ok()?;
-            if byte[0] == 0 {
-                break;
-            }
-            path_bytes.push(byte[0]);
-        }
-        let material_path = String::from_utf8_lossy(&path_bytes).into_owned();
+        let material_path = read_cstring(reader)?;
 
         let header_size = bytes
             .windows(4)
@@ -300,16 +305,7 @@ impl Bones {
         let mdls_start = bytes.windows(4).position(|w| w == b"MDLS")?;
         reader.seek(std::io::SeekFrom::Start(mdls_start as u64)).ok()?;
 
-        let mut header_bytes = Vec::new();
-        loop {
-            let mut byte = [0u8; 1];
-            reader.read_exact(&mut byte).ok()?;
-            if byte[0] == 0 {
-                break;
-            }
-            header_bytes.push(byte[0]);
-        }
-        let header = String::from_utf8_lossy(&header_bytes).into_owned();
+        let header = read_cstring(reader)?;
 
         let mut u32_buf = [0u8; 4];
         reader.read_exact(&mut u32_buf).ok()?;
@@ -341,16 +337,7 @@ impl Bones {
                 reader.seek(std::io::SeekFrom::Current((num_floats - 16) as i64 * 4)).ok()?;
             }
 
-            let mut info_bytes = Vec::new();
-            loop {
-                let mut byte = [0u8; 1];
-                reader.read_exact(&mut byte).ok()?;
-                if byte[0] == 0 {
-                    break;
-                }
-                info_bytes.push(byte[0]);
-            }
-            let info = String::from_utf8_lossy(&info_bytes).into_owned();
+            let info = read_cstring(reader)?;
 
             bones.push(BoneEntry {
                 index: i,
@@ -371,16 +358,7 @@ impl Animation {
         let mdla_start = bytes.windows(4).position(|w| w == b"MDLA")?;
         reader.seek(std::io::SeekFrom::Start(mdla_start as u64)).ok()?;
 
-        let mut header_bytes = Vec::new();
-        loop {
-            let mut byte = [0u8; 1];
-            reader.read_exact(&mut byte).ok()?;
-            if byte[0] == 0 {
-                break;
-            }
-            header_bytes.push(byte[0]);
-        }
-        let header = String::from_utf8_lossy(&header_bytes).into_owned();
+        let header = read_cstring(reader)?;
 
         let mut u32_buf = [0u8; 4];
         reader.read_exact(&mut u32_buf).ok()?;
@@ -392,29 +370,8 @@ impl Animation {
         reader.read_exact(&mut u32_buf).ok()?;
         let _unk = u32::from_le_bytes(u32_buf);
 
-        let mut strings = Vec::new();
-        for _ in 0..10 {
-            let mut s_bytes = Vec::new();
-            loop {
-                let mut byte = [0u8; 1];
-                if reader.read_exact(&mut byte).is_err() {
-                    break;
-                }
-                if byte[0] == 0 {
-                    if !s_bytes.is_empty() {
-                        strings.push(String::from_utf8_lossy(&s_bytes).into_owned());
-                    }
-                    break;
-                }
-                s_bytes.push(byte[0]);
-            }
-            if strings.len() >= 2 {
-                break;
-            }
-        }
-
-        let animation_name = strings.first().cloned().unwrap_or_default();
-        let loop_mode = strings.get(1).cloned().unwrap_or_default();
+        let animation_name = read_cstring(reader).unwrap_or_default();
+        let loop_mode = read_cstring(reader).unwrap_or_default();
 
         let data_start = reader.stream_position().ok()? as usize;
         let animation_data = bytes[data_start..].to_vec();
