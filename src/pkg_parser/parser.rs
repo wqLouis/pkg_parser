@@ -5,8 +5,8 @@ use std::{
     path::Path,
 };
 
-use log;
 use crate::pkg_parser::{mdl_parser, tex_parser, video_parser};
+use log;
 
 #[derive(Debug, Clone)]
 pub struct Pkg {
@@ -54,7 +54,10 @@ impl Pkg {
         file.read_exact(&mut buf).unwrap();
         let file_count = u32::from_le_bytes(buf);
 
-        Header { version, file_count }
+        Header {
+            version,
+            file_count,
+        }
     }
 
     fn read_entries(file: &mut BufReader<File>, entry_count: u32) -> Vec<Entry> {
@@ -202,12 +205,15 @@ impl Pkg {
 
                 log::info!("Puppet model: {}", path);
                 log::debug!(
-                    "  Records: {}, Quads: {}, Triangles: {}",
+                    "  Records: {}, Triangles: {}",
                     mdl.data.records.len(),
-                    mdl.data.quads.len(),
                     mdl.data.triangles.len()
                 );
-                log::debug!("  Bones: {}, Frames: {}", mdl.bones.bones.len(), mdl.animation.num_frames);
+                log::debug!(
+                    "  Bones: {}, Frames: {}",
+                    mdl.bones.bones.len(),
+                    mdl.animation.num_frames
+                );
 
                 // Write raw .mdl file
                 if !dry_run {

@@ -1,5 +1,4 @@
-use std::io::{BufReader, Cursor, Read};
-
+use std::io::{BufReader, Cursor, Read, Seek};
 use serde::Serialize;
 
 /// Parsed MDL (puppet model) file.
@@ -25,67 +24,37 @@ pub struct MdlvHeader {
     pub header_size: usize,
 }
 
-/// MDLV data section (control points, quad topology, triangles).
+/// MDLV data section (control points and triangles).
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MdlvData {
     pub marker_type: u32,
     pub record_block_size: u32,
     pub records: Vec<ControlPoint>,
-    pub quads: Vec<Quad>,
     pub triangles: Vec<Triangle>,
 }
 
 /// A single 80-byte control point record.
-///
-/// Each control point defines a vertex of the puppet deformation mesh,
-/// with position, texture coordinates, and hierarchical group IDs.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ControlPoint {
     pub index: u32,
-    /// X position (int16) — pixel-space coordinate on the texture atlas.
     pub pos_x: i16,
-    /// Y position (int16) — pixel-space coordinate on the texture atlas.
     pub pos_y: i16,
-    /// U texture coordinate (int16).
     pub tex_u: i16,
-    /// V texture coordinate (int16).
     pub tex_v: i16,
-    /// Major group / bone part ID.
     pub group_id: u32,
-    /// Sub-group / sub-part ID.
     pub sub_group: u32,
-    /// Sub-sub-group / vertex-type ID.
     pub sub_sub_group: u32,
-    /// Raw field at offset +0 (u32).
     pub field_0: u32,
-    /// Raw field at offset +4 (u32).
     pub field_4: u32,
-    /// Raw field at offset +12 (u32).
     pub field_12: u32,
-    /// Raw field at offset +16 (u32).
     pub field_16: u32,
-    /// Raw field at offset +28 (f32).
     pub field_28: f32,
-    /// Raw field at offset +56 (f32).
     pub field_56: f32,
-    /// Raw field at offset +60 (u32).
     pub field_60: u32,
-    /// Raw field at offset +72 (u32).
     pub field_72: u32,
-    /// Raw field at offset +76 (f32).
     pub field_76: f32,
-}
-
-/// A quad defined by 4 vertex indices, forming 2 triangles.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Quad {
-    pub a: u16,
-    pub b: u16,
-    pub c: u16,
-    pub d: u16,
 }
 
 /// A triangle defined by 3 vertex indices.
@@ -149,12 +118,12 @@ impl MdlFile {
         })
     }
 
-    /// Serialize the parsed MDL file to a pretty-printed JSON string.
+    /// Serialize to pretty-printed JSON.
     pub fn to_json(&self) -> serde_json::Result<String> {
         serde_json::to_string_pretty(self)
     }
 
-    /// Serialize the parsed MDL file to a compact JSON string.
+    /// Serialize to compact JSON.
     pub fn to_json_compact(&self) -> serde_json::Result<String> {
         serde_json::to_string(self)
     }
@@ -162,7 +131,6 @@ impl MdlFile {
 
 impl MdlvHeader {
     fn parse<R: Read + Seek>(reader: &mut R, bytes: &[u8]) -> Option<MdlvHeader> {
-        // Magic: "MDLV0023" (8 bytes)
         let mut magic_buf = [0u8; 8];
         reader.read_exact(&mut magic_buf).ok()?;
         let magic = String::from_utf8_lossy(&magic_buf).into_owned();
@@ -170,29 +138,25 @@ impl MdlvHeader {
             return None;
         }
 
-        // Offset 8: type/flags (u32)
         let mut u32_buf = [0u8; 4];
         reader.read_exact(&mut u32_buf).ok()?;
         let type_val = u32::from_le_bytes(u32_buf);
 
-        // Offset 12: version (u16)
         let mut u16_buf = [0u8; 2];
         reader.read_exact(&mut u16_buf).ok()?;
         let sub_version = u16::from_le_bytes(u16_buf);
 
-        // Offset 14: flags (u16)
         reader.read_exact(&mut u16_buf).ok()?;
         let flags = u16::from_le_bytes(u16_buf);
 
-        // Offset 16: unknown constant (u32)
         reader.read_exact(&mut u32_buf).ok()?;
         let unknown_16 = u32::from_le_bytes(u32_buf);
 
-        // Offset 20: single null padding byte
+        // Padding byte at offset 20
         let mut pad_byte = [0u8; 1];
         reader.read_exact(&mut pad_byte).ok()?;
 
-        // Offset 21+: null-terminated material path string
+        // Material path at offset 21+
         let mut path_bytes = Vec::new();
         loop {
             let mut byte = [0u8; 1];
@@ -204,7 +168,6 @@ impl MdlvHeader {
         }
         let material_path = String::from_utf8_lossy(&path_bytes).into_owned();
 
-        // Header size: find the 00 0f 00 80 marker
         let header_size = bytes
             .windows(4)
             .position(|w| w == [0x00, 0x0f, 0x00, 0x80])
@@ -224,12 +187,10 @@ impl MdlvHeader {
 
 impl MdlvData {
     fn parse<R: Read + Seek>(reader: &mut R, bytes: &[u8], data_start: usize) -> Option<MdlvData> {
-        // Seek to the data section start
         reader
             .seek(std::io::SeekFrom::Start(data_start as u64))
             .ok()?;
 
-        // Data section marker: 00 0f 00 80 (4 bytes)
         let mut marker_buf = [0u8; 4];
         reader.read_exact(&mut marker_buf).ok()?;
         let marker_type = u32::from_le_bytes(marker_buf);
@@ -237,7 +198,6 @@ impl MdlvData {
             return None;
         }
 
-        // Next: 1 byte type byte + 3-byte u24 LE size
         let mut type_byte = [0u8; 1];
         reader.read_exact(&mut type_byte).ok()?;
 
@@ -261,78 +221,44 @@ impl MdlvData {
             records.push(ControlPoint::parse(bytes, off, i as u32));
         }
 
-        // Remaining section: contains quad topology
-        let idx_start = Self::find_idx_start(bytes, record_end)?;
-        let remaining_start = record_end;
-        let remaining_size = idx_start - remaining_start;
-
-        let quads = Self::parse_quads(bytes, remaining_start, remaining_size);
-
-        // Triangle indices (always 10002 bytes)
-        let triangles = Self::parse_triangles(bytes, idx_start);
+        // Parse remaining data (between records and MDLS) as triangles
+        let mdls_pos = bytes.windows(4).position(|w| w == b"MDLS")?;
+        let triangles = Self::parse_triangles_from_gap(bytes, record_end, mdls_pos);
 
         Some(MdlvData {
             marker_type,
             record_block_size,
             records,
-            quads,
             triangles,
         })
     }
 
-    /// Find where the triangle index data starts (always 10002 bytes before MDLS).
-    fn find_idx_start(bytes: &[u8], _after_records: usize) -> Option<usize> {
-        let mdls_pos = bytes.windows(4).position(|w| w == b"MDLS")?;
-        Some(mdls_pos - 10002)
-    }
+    /// Parse the data between records_end and MDLS as triangles.
+    ///
+    /// The data starts with a 5-byte header, followed by triangle index
+    /// triplets (3 × u16 per triangle).
+    fn parse_triangles_from_gap(
+        bytes: &[u8], start: usize, mdls_pos: usize,
+    ) -> Vec<Triangle> {
+        let mut triangles = Vec::new();
 
-    fn parse_quads(bytes: &[u8], start: usize, size: usize) -> Vec<Quad> {
-        let mut quads = Vec::new();
-
-        // First 5 bytes: header (skip)
-        let data_start = start + 5;
-        let data_size = size.saturating_sub(5);
-        let num_u16 = data_size / 2;
-
-        for i in (0..num_u16).step_by(6) {
-            if data_start + (i + 5) * 2 > start + size {
-                break;
-            }
-            let a = u16::from_le_bytes([
-                bytes[data_start + i * 2],
-                bytes[data_start + i * 2 + 1],
-            ]);
-            let b = u16::from_le_bytes([
-                bytes[data_start + (i + 1) * 2],
-                bytes[data_start + (i + 1) * 2 + 1],
-            ]);
-            let c = u16::from_le_bytes([
-                bytes[data_start + (i + 2) * 2],
-                bytes[data_start + (i + 2) * 2 + 1],
-            ]);
-            let d = u16::from_le_bytes([
-                bytes[data_start + (i + 5) * 2],
-                bytes[data_start + (i + 5) * 2 + 1],
-            ]);
-            quads.push(Quad { a, b, c, d });
+        if mdls_pos < start + 5 + 6 {
+            return triangles;
         }
 
-        quads
-    }
+        // Skip the 5-byte section header
+        let data_start = start + 5;
+        let gap_size = mdls_pos - data_start;
+        let max_u16 = gap_size / 2;
 
-    fn parse_triangles(bytes: &[u8], start: usize) -> Vec<Triangle> {
-        let mut triangles = Vec::new();
-        // Triangle data is always 10002 bytes = 1667 triangles
-        let size = 10002usize;
-
-        for j in (0..size).step_by(6) {
-            if start + j + 6 > bytes.len() {
-                break;
-            }
-            let a = u16::from_le_bytes([bytes[start + j], bytes[start + j + 1]]);
-            let b = u16::from_le_bytes([bytes[start + j + 2], bytes[start + j + 3]]);
-            let c = u16::from_le_bytes([bytes[start + j + 4], bytes[start + j + 5]]);
+        let mut i = 0;
+        while i + 3 <= max_u16 {
+            let off = data_start + i * 2;
+            let a = u16::from_le_bytes([bytes[off], bytes[off + 1]]);
+            let b = u16::from_le_bytes([bytes[off + 2], bytes[off + 3]]);
+            let c = u16::from_le_bytes([bytes[off + 4], bytes[off + 5]]);
             triangles.push(Triangle { a, b, c });
+            i += 3;
         }
 
         triangles
@@ -341,119 +267,39 @@ impl MdlvData {
 
 impl ControlPoint {
     fn parse(bytes: &[u8], offset: usize, index: u32) -> ControlPoint {
-        let field_0 = u32::from_le_bytes([
-            bytes[offset],
-            bytes[offset + 1],
-            bytes[offset + 2],
-            bytes[offset + 3],
-        ]);
-        let field_4 = u32::from_le_bytes([
-            bytes[offset + 4],
-            bytes[offset + 5],
-            bytes[offset + 6],
-            bytes[offset + 7],
-        ]);
+        let field_0 = u32::from_le_bytes([bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]]);
+        let field_4 = u32::from_le_bytes([bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7]]);
 
         let pos_x = i16::from_le_bytes([bytes[offset], bytes[offset + 1]]);
         let pos_y = i16::from_le_bytes([bytes[offset + 2], bytes[offset + 3]]);
         let tex_u = i16::from_le_bytes([bytes[offset + 4], bytes[offset + 5]]);
         let tex_v = i16::from_le_bytes([bytes[offset + 6], bytes[offset + 7]]);
 
-        let group_id = u32::from_le_bytes([
-            bytes[offset + 8],
-            bytes[offset + 9],
-            bytes[offset + 10],
-            bytes[offset + 11],
-        ]);
-        let field_12 = u32::from_le_bytes([
-            bytes[offset + 12],
-            bytes[offset + 13],
-            bytes[offset + 14],
-            bytes[offset + 15],
-        ]);
-        let field_16 = u32::from_le_bytes([
-            bytes[offset + 16],
-            bytes[offset + 17],
-            bytes[offset + 18],
-            bytes[offset + 19],
-        ]);
-
-        let field_28 = f32::from_le_bytes([
-            bytes[offset + 28],
-            bytes[offset + 29],
-            bytes[offset + 30],
-            bytes[offset + 31],
-        ]);
-
-        let sub_group = u32::from_le_bytes([
-            bytes[offset + 32],
-            bytes[offset + 33],
-            bytes[offset + 34],
-            bytes[offset + 35],
-        ]);
-
-        let sub_sub_group = u32::from_le_bytes([
-            bytes[offset + 64],
-            bytes[offset + 65],
-            bytes[offset + 66],
-            bytes[offset + 67],
-        ]);
-
-        let field_56 = f32::from_le_bytes([
-            bytes[offset + 56],
-            bytes[offset + 57],
-            bytes[offset + 58],
-            bytes[offset + 59],
-        ]);
-        let field_60 = u32::from_le_bytes([
-            bytes[offset + 60],
-            bytes[offset + 61],
-            bytes[offset + 62],
-            bytes[offset + 63],
-        ]);
-        let field_72 = u32::from_le_bytes([
-            bytes[offset + 72],
-            bytes[offset + 73],
-            bytes[offset + 74],
-            bytes[offset + 75],
-        ]);
-        let field_76 = f32::from_le_bytes([
-            bytes[offset + 76],
-            bytes[offset + 77],
-            bytes[offset + 78],
-            bytes[offset + 79],
-        ]);
+        let group_id = u32::from_le_bytes([bytes[offset + 8], bytes[offset + 9], bytes[offset + 10], bytes[offset + 11]]);
+        let field_12 = u32::from_le_bytes([bytes[offset + 12], bytes[offset + 13], bytes[offset + 14], bytes[offset + 15]]);
+        let field_16 = u32::from_le_bytes([bytes[offset + 16], bytes[offset + 17], bytes[offset + 18], bytes[offset + 19]]);
+        let field_28 = f32::from_le_bytes([bytes[offset + 28], bytes[offset + 29], bytes[offset + 30], bytes[offset + 31]]);
+        let sub_group = u32::from_le_bytes([bytes[offset + 32], bytes[offset + 33], bytes[offset + 34], bytes[offset + 35]]);
+        let sub_sub_group = u32::from_le_bytes([bytes[offset + 64], bytes[offset + 65], bytes[offset + 66], bytes[offset + 67]]);
+        let field_56 = f32::from_le_bytes([bytes[offset + 56], bytes[offset + 57], bytes[offset + 58], bytes[offset + 59]]);
+        let field_60 = u32::from_le_bytes([bytes[offset + 60], bytes[offset + 61], bytes[offset + 62], bytes[offset + 63]]);
+        let field_72 = u32::from_le_bytes([bytes[offset + 72], bytes[offset + 73], bytes[offset + 74], bytes[offset + 75]]);
+        let field_76 = f32::from_le_bytes([bytes[offset + 76], bytes[offset + 77], bytes[offset + 78], bytes[offset + 79]]);
 
         ControlPoint {
-            index,
-            pos_x,
-            pos_y,
-            tex_u,
-            tex_v,
-            group_id,
-            sub_group,
-            sub_sub_group,
-            field_0,
-            field_4,
-            field_12,
-            field_16,
-            field_28,
-            field_56,
-            field_60,
-            field_72,
-            field_76,
+            index, pos_x, pos_y, tex_u, tex_v,
+            group_id, sub_group, sub_sub_group,
+            field_0, field_4, field_12, field_16,
+            field_28, field_56, field_60, field_72, field_76,
         }
     }
 }
 
 impl Bones {
     fn parse<R: Read + Seek>(reader: &mut R, bytes: &[u8]) -> Option<Bones> {
-        // Find the MDLS section
         let mdls_start = bytes.windows(4).position(|w| w == b"MDLS")?;
-
         reader.seek(std::io::SeekFrom::Start(mdls_start as u64)).ok()?;
 
-        // Read "MDLS" header (null-terminated)
         let mut header_bytes = Vec::new();
         loop {
             let mut byte = [0u8; 1];
@@ -465,18 +311,15 @@ impl Bones {
         }
         let header = String::from_utf8_lossy(&header_bytes).into_owned();
 
-        // u32: next section offset (MDLA)
         let mut u32_buf = [0u8; 4];
         reader.read_exact(&mut u32_buf).ok()?;
         let _next_offset = u32::from_le_bytes(u32_buf);
 
-        // u32: number of bones
         reader.read_exact(&mut u32_buf).ok()?;
         let num_bones = u32::from_le_bytes(u32_buf);
 
         let mut bones = Vec::with_capacity(num_bones as usize);
         for i in 0..num_bones {
-            // BONEENTRYHEADER: BYTE tmp, DWORD type, DWORD unk1 (9 bytes)
             let mut tmp = [0u8; 1];
             reader.read_exact(&mut tmp).ok()?;
             reader.read_exact(&mut u32_buf).ok()?;
@@ -484,11 +327,9 @@ impl Bones {
             reader.read_exact(&mut u32_buf).ok()?;
             let unk1 = u32::from_le_bytes(u32_buf);
 
-            // DWORD entryByteLength
             reader.read_exact(&mut u32_buf).ok()?;
             let entry_byte_len = u32::from_le_bytes(u32_buf);
 
-            // float matrix[entryByteLength / 4]
             let num_floats = entry_byte_len as usize / 4;
             let mut matrix = [0.0f32; 16];
             for j in 0..num_floats.min(16) {
@@ -496,14 +337,10 @@ impl Bones {
                 reader.read_exact(&mut f32_buf).ok()?;
                 matrix[j] = f32::from_le_bytes(f32_buf);
             }
-            // Skip any remaining floats beyond 16
             if num_floats > 16 {
-                reader
-                    .seek(std::io::SeekFrom::Current((num_floats - 16) as i64 * 4))
-                    .ok()?;
+                reader.seek(std::io::SeekFrom::Current((num_floats - 16) as i64 * 4)).ok()?;
             }
 
-            // CHAR info[] (null-terminated string)
             let mut info_bytes = Vec::new();
             loop {
                 let mut byte = [0u8; 1];
@@ -532,12 +369,8 @@ impl Bones {
 impl Animation {
     fn parse<R: Read + Seek>(reader: &mut R, bytes: &[u8]) -> Option<Animation> {
         let mdla_start = bytes.windows(4).position(|w| w == b"MDLA")?;
+        reader.seek(std::io::SeekFrom::Start(mdla_start as u64)).ok()?;
 
-        reader
-            .seek(std::io::SeekFrom::Start(mdla_start as u64))
-            .ok()?;
-
-        // Read "MDLA" header (null-terminated)
         let mut header_bytes = Vec::new();
         loop {
             let mut byte = [0u8; 1];
@@ -549,7 +382,6 @@ impl Animation {
         }
         let header = String::from_utf8_lossy(&header_bytes).into_owned();
 
-        // 4 DWORDs
         let mut u32_buf = [0u8; 4];
         reader.read_exact(&mut u32_buf).ok()?;
         let end_offset = u32::from_le_bytes(u32_buf);
@@ -560,7 +392,6 @@ impl Animation {
         reader.read_exact(&mut u32_buf).ok()?;
         let _unk = u32::from_le_bytes(u32_buf);
 
-        // Read null-terminated strings
         let mut strings = Vec::new();
         for _ in 0..10 {
             let mut s_bytes = Vec::new();
@@ -585,7 +416,6 @@ impl Animation {
         let animation_name = strings.first().cloned().unwrap_or_default();
         let loop_mode = strings.get(1).cloned().unwrap_or_default();
 
-        // Read the rest as animation data
         let data_start = reader.stream_position().ok()? as usize;
         let animation_data = bytes[data_start..].to_vec();
 
@@ -600,6 +430,3 @@ impl Animation {
         })
     }
 }
-
-// Helper trait to allow seeking on BufReader<Cursor<&[u8]>>
-use std::io::Seek;

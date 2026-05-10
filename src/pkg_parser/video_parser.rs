@@ -1,9 +1,6 @@
 use std::io::Cursor;
 
-use image::{
-    codecs::gif::GifDecoder,
-    AnimationDecoder, ImageBuffer, ImageDecoder, Rgba,
-};
+use image::{AnimationDecoder, ImageBuffer, ImageDecoder, Rgba, codecs::gif::GifDecoder};
 
 /// Detected video or GIF format.
 #[derive(Debug, Clone, PartialEq)]
@@ -69,10 +66,7 @@ impl Video {
         match &self.format {
             VideoFormat::Gif => {
                 let decoder = GifDecoder::new(Cursor::new(&self.data)).ok()?;
-                let frames = decoder
-                    .into_frames()
-                    .collect_frames()
-                    .ok()?;
+                let frames = decoder.into_frames().collect_frames().ok()?;
                 Some(
                     frames
                         .into_iter()
@@ -142,10 +136,7 @@ fn extract_gif_frame(bytes: &[u8], index: u32) -> Option<Vec<u8>> {
 /// a list of (png_bytes, filename_suffix).
 /// The `stem` should be the base file name without extension
 /// (e.g. "animation" for "animation.gif").
-pub fn save_gif_frames(
-    bytes: &[u8],
-    stem: &str,
-) -> Option<Vec<(Vec<u8>, String)>> {
+pub fn save_gif_frames(bytes: &[u8], stem: &str) -> Option<Vec<(Vec<u8>, String)>> {
     let decoder = GifDecoder::new(Cursor::new(bytes)).ok()?;
     let frames = decoder.into_frames().collect_frames().ok()?;
 
