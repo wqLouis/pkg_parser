@@ -1,152 +1,208 @@
-# Wallpaper Engine `.pkg` File Format Documentation
+# Wallpaper Engine File Format Documentation
 
-This document describes the binary structure of the `.pkg` files used by Wallpaper Engine to package scene assets (models, textures, scripts, etc.).
+This document describes the binary formats used by Wallpaper Engine scene packages.
 
-## Overview
+- **`.pkg`** — Archive container for scene assets
+- **`.tex`** — Texture/image files
+- **`.mdl`** — Puppet warp model files (2D deformation meshes)
 
-The `.pkg` format is a simple, index-based archive. It consists of a **Header**, a **File Table** (Directory), and a **Data Blob**.
-
-*   **Endianness:** Little Endian
-*   **String Encoding:** UTF-8
-*   **Integer Sizes:** 32-bit (`u32`)
-*   **Note:** Because offsets are `u32`, the theoretical maximum size of a `.pkg` file is 4 GB.
+All formats use **Little Endian** byte order and **UTF-8** string encoding unless otherwise noted.
 
 ---
 
-## File Structure
+# `.pkg` Archive Format
 
-The file is laid out sequentially in three distinct sections.
+The `.pkg` format is a simple index-based archive. It consists of a **Header**, a **File Table**, and a **Data Blob**.
 
-```text
-+------------------+ 
-|  HEADER          |  <-- Starts at Byte 0
+```
 +------------------+
-|  FILE TABLE      |  <-- Starts after Header
-|  (Entry 1)       |
-|  (Entry 2)       |
-|  ...             |
+|  HEADER          |
 +------------------+
-|  DATA BLOB       |  <-- Starts at arbitrary offsets
-|  [File Data]     |
+|  FILE TABLE      |
+|  (Entry 1..N)    |
++------------------+
+|  DATA BLOB       |
 |  [File Data]     |
 +------------------+
 ```
 
----
-
-## 1. Header
-
-The header contains metadata required to parse the file table.
+## Header
 
 | Offset | Type | Size | Description |
 |--------|------|------|-------------|
-| `0x00` | `u32` | 4 | **Version String Length**. The number of bytes to read for the version string. |
-| `0x04` | `char[]` | Variable | **Version String**. Typically `PKGV0022` (or similar). |
-| `0x04+len` | `u32` | 4 | **File Count**. The total number of file entries in the table. |
+| `0x00` | `u32` | 4 | Length of version string |
+| `0x04` | `char[]` | var | Version string (e.g. `PKGV0022`) |
+| after | `u32` | 4 | Number of files in the package |
 
-**Example:**
-If the version string is `PKGV0022` (8 bytes):
-1. Read `u32` -> `8`
-2. Read 8 bytes -> `PKGV0022`
-3. Read `u32` -> Total file count (e.g., `167`)
-
----
-
-## 2. File Table
-
-The File Table is a flat array of entries. It contains no directory hierarchy; directories are implied by the file paths (e.g., `models/box.json`).
-
-The table repeats the following structure for every file defined in **File Count**:
-
-### Entry Structure
+## File Table Entry (repeated per file)
 
 | Field | Type | Size | Description |
 |-------|------|------|-------------|
-| **Path Length** | `u32` | 4 | Length of the file path string. |
-| **Path** | `char[]` | Variable | The relative path of the file within the package (e.g., `scene.json`, `materials/texture.tex`). |
-| **Offset** | `u32` | 4 | The absolute byte offset in the file where the file's data begins. |
-| **Size** | `u32` | 4 | The size of the file data in bytes. |
+| Path Length | `u32` | 4 | Byte length of the path string |
+| Path | `char[]` | var | Relative file path (e.g. `scene.json`) |
+| Offset | `u32` | 4 | Byte offset of file data from data start |
+| Size | `u32` | 4 | Byte size of file data |
+
+## Data Blob
+
+Raw file contents concatenated sequentially. Each file's data is located by seeking to `data_start + entry.offset` and reading `entry.size` bytes.
 
 ---
 
-## 3. Data Blob
+# `.tex` Texture Format
 
-The data section contains the raw content of the files. There are no separators or padding bytes between files.
+## Header
 
-To read a file:
-1. Locate its entry in the **File Table**.
-2. Seek to the **Offset**.
-3. Read **Size** bytes.
+| Offset | Size | Type | Description |
+|--------|------|------|-------------|
+| `0x00` | 8 | `char[8]` | Version magic (e.g. `TEXV0005`) |
+| `0x08` | 1 | — | Separator |
+| `0x09` | 8 | `char[8]` | Info magic (e.g. `TEXI0002`) |
+| `0x11` | 1 | — | Separator |
+| `0x12` | 4 | `u32` | Format ID |
+| `0x16` | 4 | — | Padding |
+| `0x1A` | 4 | `u32` | Width |
+| `0x1E` | 4 | `u32` | Height |
+| `0x22` | 12 | — | Padding |
+| `0x2E` | 8 | `char[8]` | Block magic (e.g. `TEXB0003`) |
+| `0x36` | 1 | — | Separator |
+| `0x37` | 4 | `u32` | Image count |
+| `0x3B` | 8 | — | Padding |
+| `0x43` | 4 | `u32` | Mipmap count |
 
-# `.tex` File Structure Specification
+## Format IDs
 
-This document outlines the binary layout of the texture file format as defined by the parser logic in `parse()`.
+| ID | Format | Description |
+|----|--------|-------------|
+| 0 | raw | Embedded PNG/JPG |
+| 4, 7 | dxt1 | BC1/DXT1 compressed |
+| 6 | dxt5 | BC3/DXT5 compressed |
+| 8 | rg88 | 2-channel uncompressed |
+| 9 | r8 | 1-channel uncompressed |
 
-## 1. Global Header
-The file begins with a fixed-size header containing version information, format identifiers, and global image dimensions.
+## Payload
 
-| Offset | Size (Bytes) | Type | Variable Name | Description |
-| :--- | :--- | :--- | :--- | :--- |
-| `0x00` | 8 | `[u8; 8]` | `texv` | Version Magic String (e.g., `TEXV0005`) |
-| `0x08` | 1 | - | - | Separator / Padding |
-| `0x09` | 8 | `[u8; 8]` | `texi` | Info Magic String |
-| `0x11` | 1 | - | - | Separator / Padding |
-| `0x12` | 4 | `u32` (LE) | `format` | Format ID (See [Format Table](#format-ids)) |
-| `0x16` | 4 | - | - | Skip / Padding |
-| `0x1A` | 4 | `u32` (LE) | `dimension[0]` | Target Image Width |
-| `0x1E` | 4 | `u32` (LE) | `dimension[1]` | Target Image Height |
-| `0x22` | 12 | - | - | Skip / Padding |
-| `0x2E` | 8 | `[u8; 8]` | `texb` | Block Magic String (e.g., `TEXB0003`) |
-| `0x36` | 1 | - | - | Separator / Padding |
-| `0x37` | 4 | `u32` (LE) | `image_count` | Number of images in container |
-| `0x3B` | 8 | - | - | Skip / Padding |
-| `0x43` | 4 | `u32` (LE) | `mipmap_count` | Number of mipmaps |
+### Raw format (ID 0)
+| Offset | Type | Size | Description |
+|--------|------|------|-------------|
+| `0x47` | — | 16 | Padding |
+| `0x57` | `u32` | 4 | Payload size |
+| `0x5B` | `u8[]` | var | Embedded image data (PNG/JPG) |
+
+### Compressed formats (IDs 4, 6, 7, 8, 9)
+| Offset | Type | Size | Description |
+|--------|------|------|-------------|
+| `0x47` | — | 8 | Padding (mipmap dimensions) |
+| `0x4F` | `u32` | 4 | LZ4 flag (1 = compressed) |
+| `0x53` | `u32` | 4 | Decompressed size |
+| `0x57` | `u32` | 4 | Payload size |
+| `0x5B` | `u8[]` | var | Pixel data (decompress with LZ4 if flag set) |
 
 ---
 
-## 2. Format IDs
-The `format` field at offset `0x12` determines how the payload data is interpreted.
+# `.mdl` Puppet Model Format
 
-| ID Value | Name | Description |
-| :--- | :--- | :--- |
-| `0` | `raw` | Uncompressed embedded image (PNG/JPG). |
-| `4` | `dxt1` | Compressed (DXT1). |
-| `6` | `dxt5` | Compressed (DXT5). |
-| `7` | `dxt1` | Compressed (DXT1 variant). |
-| `8` | `rg88` | Uncompressed (RG88). |
-| `9` | `r8` | Uncompressed (Grayscale/Mask). |
+The `.mdl` file defines a deformable 2D mesh used for puppet warp animation (Live2D-style). It contains control points, triangle topology, a skeleton, and animation keyframes.
 
----
+```
++------------------+
+|  MDLV Section    |  ← Mesh: control points + triangles
++------------------+
+|  MDLS Section    |  ← Skeleton: bones + matrices
++------------------+
+|  MDLA Section    |  ← Animation: keyframes
++------------------+
+```
 
-## 3. Payload Structure
-The structure of the data following the header depends on the `format` ID.
+## 1. MDLV Section Header
 
-### Case A: Format 0 (`raw`)
-If the format is `0`, the parser treats the data as a standard image file (PNG or JPG) embedded directly.
+| Offset | Size | Type | Description |
+|--------|------|------|-------------|
+| `0x00` | 8 | `char[8]` | Magic: `MDLV0023` |
+| `0x08` | 4 | `u32` | Type/flags: `0x80000900` |
+| `0x0C` | 2 | `u16` | Sub-version: `0x0101` |
+| `0x0E` | 2 | `u16` | Flags: `0x0000` |
+| `0x10` | 4 | `u32` | Unknown (typically `256`) |
+| `0x14` | 1 | `u8` | Padding |
+| `0x15` | var | `char[]` | Material path (null-terminated) |
+| var | — | — | Zero-padding to alignment |
+| var | 4 | `u32` | Marker: `0x80000F00` |
+| +4 | 1 | `u8` | Type byte: `0x01` |
+| +5 | 3 | `u24` | Control point block size (bytes) |
 
-| Offset | Size (Bytes) | Type | Description |
-| :--- | :--- | :--- | :--- |
-| `0x47` | 16 | - | Skip / Padding |
-| `0x57` | 4 | `u32` (LE) | `size` | Size of the embedded image data |
-| `0x5B` | `size` | `u8[]` | `payload` | Raw bytes of the PNG or JPG file |
+## Control Point Records
 
-**Notes:**
-*   The parser determines the file type (PNG vs JPG) by inspecting the first few bytes of the `payload`.
-*   It skips 16 bytes after `mipmap_count` before reading the data size.
+An array of **80-byte records** follows the marker. Each record defines a vertex of the puppet deformation mesh.
 
-### Case B: Other Formats (DXT, R8, RG88)
-For formats `4`, `6`, `8`, and `9`, the payload is either raw pixel data or LZ4 compressed data.
+| Offset | Size | Type | Description |
+|--------|------|------|-------------|
+| `+0x00` | 2 | `i16` | X position (pixel-space) |
+| `+0x02` | 2 | `i16` | Y position (pixel-space) |
+| `+0x04` | 2 | `i16` | U texture coordinate |
+| `+0x06` | 2 | `i16` | V texture coordinate |
+| `+0x08` | 4 | `u32` | **Group ID** — major part (63–68, 191–196) |
+| `+0x0C` | 4 | `u32` | Unknown |
+| `+0x10` | 4 | `u32` | Unknown |
+| `+0x14` | 4 | `u32` | Constant `0x80000000` |
+| `+0x18` | 4 | `u32` | Constant `0x8000003F` |
+| `+0x1C` | 4 | `f32` | Float (varies) |
+| `+0x20` | 4 | `u32` | **Sub-group ID** (49–55, 175–183) |
+| `+0x24` | 4 | `u32` | Constant `0x80000000` |
+| `+0x28` | 4 | `u32` | Constant `319` (render layer?) |
+| `+0x2C` | 12 | `u8[12]` | Zero padding |
+| `+0x38` | 4 | `f32` | Float (27 unique values) |
+| `+0x3C` | 4 | `u32` | Flag (`0x0000003F` or `0x80000000`) |
+| `+0x40` | 4 | `u32` | **Sub-sub-group ID** (0, 55–63) |
+| `+0x44` | 4 | `u32` | Unknown |
+| `+0x48` | 4 | `u32` | Raw (varies) |
+| `+0x4C` | 4 | `f32` | Float (varies) |
 
-| Offset | Size (Bytes) | Type       | Description                                          |                                                |
-| :----- | :----------- | :--------- | :--------------------------------------------------- | ---------------------------------------------- |
-| `0x47` | 8            | -          | Skip / Padding (Likely specific mipmap width/height) |                                                |
-| `0x4F` | 4            | `u32` (LE) | `lz4`                                                | Compression Flag (`1` = Compressed, `0` = Raw) |
-| `0x53` | 4            | `u32` (LE) | `dncompressed_size`                                  | Size of data after decompression               |
-| `0x57` | 4            | `u32` (LE) | `size`                                               | Size of the data chunk in the file             |
-| `0x5B` | `size`       | `u8[]`     | `payload`                                            | The pixel data (compressed or raw)             |
+The three group IDs form a **3-level hierarchy** for skeletal deformation.
 
-**Processing Logic:**
-1.  Read `size` bytes from `0x5B`.
-2.  If `lz4` == `1`: Decompress the data using LZ4 block decompression. The output buffer size must match `uncompressed_size`.
-3.  If `lz4` == `0`: The data is already raw.
-4.  Interpret the resulting bytes based on the Format ID (e.g., for `r8`, expand single bytes to RGBA pixels).
+## Triangle Index Data
+
+After the control points comes a section with a **5-byte header** followed by triangle indices. Each triangle is `3 × u16` (6 bytes).
+
+```
+[5-byte header] → [a, b, c] × N triangles
+```
+
+## 2. MDLS Section (Skeleton)
+
+```
+MDLS0004\0  [u32 next_offset]  [u32 bone_count]  [BONEENTRY × bone_count]
+```
+
+Each bone entry:
+
+| Offset | Size | Type | Description |
+|--------|------|------|-------------|
+| `+0x00` | 1 | `u8` | tmp |
+| `+0x01` | 4 | `u32` | Bone type (typically `1`) |
+| `+0x05` | 4 | `u32` | Unknown |
+| `+0x09` | 4 | `u32` | Entry byte length (typically `64`) |
+| `+0x0D` | 64 | `f32[16]` | 4×4 bone matrix |
+| `+0x4D` | var | `char[]` | JSON metadata (null-terminated) |
+
+Bone metadata example:
+```json
+{"a":null,"tp":"36.16162 726.83881 0.00000","tm":100.0}
+```
+
+The `tp` field defines the **bone pin position** `(x, y, z)` on the texture.
+
+## 3. MDLA Section (Animation)
+
+```
+MDLA0006\0  [u32 end_offset]  [u32 anim_count]  [u32 frame_count]  [u32 pad]
+[str name\0]  [str loop\0]  [keyframe_data]
+```
+
+| Field | Description |
+|-------|-------------|
+| `end_offset` | Absolute offset to animation data end |
+| `anim_count` | Typically `1` |
+| `frame_count` | Number of keyframes (215–812 observed) |
+| `name` | Animation name |
+| `loop` | Loop mode (e.g. `"loop"`) |
+| `keyframe_data` | Raw animation data (format TBD) |

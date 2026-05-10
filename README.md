@@ -9,6 +9,7 @@ A high-performance Rust library and command-line tool for parsing Wallpaper Engi
 * **Robust Extraction**: Seamlessly extracts files from `.pkg` archives while preserving the original directory structure.
 * **Texture Conversion**: Converts proprietary `.tex` texture files to standard `.png` format.
   * *Note: Texture conversion is very **Work In Progress (WIP)** it breaks idk *
+* **Puppet Model Parsing**: Parses `.mdl` puppet warp model files containing control points, skeleton data, triangle meshes, and animation keyframes.
 
 ## Installation
 
