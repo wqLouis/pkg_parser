@@ -1,7 +1,10 @@
 use std::io::{BufReader, Cursor, Read};
 
+use serde::Serialize;
+
 /// Parsed MDL (puppet model) file.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MdlFile {
     pub header: MdlvHeader,
     pub data: MdlvData,
@@ -10,7 +13,8 @@ pub struct MdlFile {
 }
 
 /// MDLV section header.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MdlvHeader {
     pub magic: String,
     pub type_val: u32,
@@ -22,7 +26,8 @@ pub struct MdlvHeader {
 }
 
 /// MDLV data section (control points, quad topology, triangles).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MdlvData {
     pub marker_type: u32,
     pub record_block_size: u32,
@@ -35,7 +40,8 @@ pub struct MdlvData {
 ///
 /// Each control point defines a vertex of the puppet deformation mesh,
 /// with position, texture coordinates, and hierarchical group IDs.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ControlPoint {
     pub index: u32,
     /// X position (int16) — pixel-space coordinate on the texture atlas.
@@ -73,7 +79,8 @@ pub struct ControlPoint {
 }
 
 /// A quad defined by 4 vertex indices, forming 2 triangles.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Quad {
     pub a: u16,
     pub b: u16,
@@ -82,7 +89,8 @@ pub struct Quad {
 }
 
 /// A triangle defined by 3 vertex indices.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Triangle {
     pub a: u16,
     pub b: u16,
@@ -90,14 +98,16 @@ pub struct Triangle {
 }
 
 /// MDLS (bone/skeleton) section.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Bones {
     pub header: String,
     pub bones: Vec<BoneEntry>,
 }
 
 /// A single bone entry with transformation matrix and metadata.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BoneEntry {
     pub index: u32,
     pub tmp: u8,
@@ -108,7 +118,8 @@ pub struct BoneEntry {
 }
 
 /// MDLA (animation) section.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Animation {
     pub header: String,
     pub end_offset: u32,
@@ -136,6 +147,16 @@ impl MdlFile {
             bones,
             animation,
         })
+    }
+
+    /// Serialize the parsed MDL file to a pretty-printed JSON string.
+    pub fn to_json(&self) -> serde_json::Result<String> {
+        serde_json::to_string_pretty(self)
+    }
+
+    /// Serialize the parsed MDL file to a compact JSON string.
+    pub fn to_json_compact(&self) -> serde_json::Result<String> {
+        serde_json::to_string(self)
     }
 }
 

@@ -6,7 +6,7 @@ use std::{
 };
 
 use log;
-use crate::pkg_parser::{tex_parser, video_parser};
+use crate::pkg_parser::{mdl_parser, tex_parser, video_parser};
 
 #[derive(Debug, Clone)]
 pub struct Pkg {
@@ -109,6 +109,7 @@ impl Pkg {
         dry_run: bool,
         parse_tex: bool,
         parse_video: bool,
+        parse_mdl: bool,
     ) {
         for (path, bytes) in &self.files {
             let output_path = target.join(path);
@@ -187,6 +188,44 @@ impl Pkg {
                     if !dry_run {
                         create_dir_all(output_path.parent().unwrap()).unwrap();
                         fs::write(&output_path, bytes).unwrap();
+                    }
+                }
+            } else if parse_mdl && ext == "mdl" {
+                let Some(mdl) = mdl_parser::MdlFile::new(bytes) else {
+                    log::warn!("failed to parse mdl: {}", path);
+                    if !dry_run {
+                        create_dir_all(output_path.parent().unwrap()).unwrap();
+                        fs::write(&output_path, bytes).unwrap();
+                    }
+                    continue;
+                };
+
+                log::info!("Puppet model: {}", path);
+                log::debug!(
+                    "  Records: {}, Quads: {}, Triangles: {}",
+                    mdl.data.records.len(),
+                    mdl.data.quads.len(),
+                    mdl.data.triangles.len()
+                );
+                log::debug!("  Bones: {}, Frames: {}", mdl.bones.bones.len(), mdl.animation.num_frames);
+
+                // Write raw .mdl file
+                if !dry_run {
+                    create_dir_all(output_path.parent().unwrap()).unwrap();
+                    fs::write(&output_path, bytes).unwrap();
+                }
+
+                // Write parsed JSON
+                match mdl.to_json() {
+                    Ok(json) => {
+                        let mut json_path = output_path.clone();
+                        json_path.set_extension("mdl.json");
+                        if !dry_run {
+                            fs::write(&json_path, &json).unwrap();
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("failed to serialize mdl json: {}: {}", path, e);
                     }
                 }
             } else {
