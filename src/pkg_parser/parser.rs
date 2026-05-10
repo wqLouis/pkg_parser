@@ -5,6 +5,7 @@ use std::{
     path::Path,
 };
 
+use log;
 use crate::pkg_parser::{tex_parser, video_parser};
 
 #[derive(Debug, Clone)]
@@ -108,7 +109,6 @@ impl Pkg {
         dry_run: bool,
         parse_tex: bool,
         parse_video: bool,
-        verbose: bool,
     ) {
         for (path, bytes) in &self.files {
             let output_path = target.join(path);
@@ -121,25 +121,22 @@ impl Pkg {
 
             if parse_tex && ext == "tex" {
                 let Some(tex) = tex_parser::Tex::new(bytes) else {
-                    println!("failed to parse tex: {}", path);
+                    log::warn!("failed to parse tex: {}", path);
                     continue;
                 };
 
-                if verbose {
-                    println!("Texture:");
-                    println!("Texv: {}", tex.texv);
-                    println!("Texi: {}", tex.texi);
-                    println!("Texb: {}", tex.texb);
-                    println!("Image count: {}", tex.image_count);
-                    println!("Mipmap count: {}", tex.mipmap_count);
-                    println!("Lz4 compressed: {}", tex.lz4);
-                    println!("Texture size: {}", tex.size);
-                    println!("w: {} h: {}", tex.dimension[0], tex.dimension[1]);
-                    println!();
-                }
+                log::info!("Texture: {}", path);
+                log::debug!("  Texv: {}", tex.texv);
+                log::debug!("  Texi: {}", tex.texi);
+                log::debug!("  Texb: {}", tex.texb);
+                log::debug!("  Image count: {}", tex.image_count);
+                log::debug!("  Mipmap count: {}", tex.mipmap_count);
+                log::debug!("  Lz4 compressed: {}", tex.lz4);
+                log::debug!("  Texture size: {}", tex.size);
+                log::debug!("  w: {} h: {}", tex.dimension[0], tex.dimension[1]);
 
                 let Some((img_data, img_ext)) = tex.parse_to_image() else {
-                    println!("failed to parse image: {}", path);
+                    log::warn!("failed to parse image: {}", path);
                     continue;
                 };
 
@@ -152,20 +149,17 @@ impl Pkg {
                 }
             } else if parse_video && matches!(ext.as_str(), "mp4" | "webm" | "gif") {
                 let Some(video) = video_parser::Video::new(bytes) else {
-                    println!("failed to parse video/gif: {}", path);
+                    log::warn!("failed to parse video/gif: {}", path);
                     continue;
                 };
 
-                if verbose {
-                    println!("Video/GIF:");
-                    println!("Format: {:?}", video.format);
-                    if let Some((w, h)) = video.dimensions {
-                        println!("Dimensions: {}x{}", w, h);
-                    }
-                    if let Some(count) = video.frame_count {
-                        println!("Frame count: {}", count);
-                    }
-                    println!();
+                log::info!("Video/GIF: {}", path);
+                log::debug!("  Format: {:?}", video.format);
+                if let Some((w, h)) = video.dimensions {
+                    log::debug!("  Dimensions: {}x{}", w, h);
+                }
+                if let Some(count) = video.frame_count {
+                    log::debug!("  Frame count: {}", count);
                 }
 
                 if video.is_gif() && parse_video {

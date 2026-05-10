@@ -8,6 +8,7 @@ license = "GPL-3.0"
 [dependencies]
 bcndecode = "0.2.0"
 image = "0.25.9"
+log = "0.4"
 lz4_flex = "0.12.0"
 
 [profile.release]
