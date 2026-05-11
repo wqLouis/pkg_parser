@@ -191,7 +191,15 @@ impl Tex {
             // They will be uploaded with the correct GPU format (R8Unorm / Rg8Unorm)
             // by the renderer, not expanded to RGBA here.
             "mp4" | "gif" | "rg88" | "r8" => {}
-            _ => return None,
+            // Unknown format ("tex") — treat payload as raw RGBA if size matches
+            _ => {
+                let expected = w * h * 4;
+                if self.payload.len() == expected {
+                    // Already RGBA, no conversion needed
+                } else {
+                    return None;
+                }
+            }
         };
 
         Some(())
