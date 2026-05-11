@@ -149,37 +149,48 @@ impl Tex {
     pub fn parse_to_rgba(&mut self) -> Option<()> {
         let (w, h) = (self.dimension[0] as usize, self.dimension[1] as usize);
 
-        self.payload = match self.extension.as_str() {
-            "png" => image::load_from_memory_with_format(&self.payload, image::ImageFormat::Png)
-                .ok()?
-                .into_rgba8()
-                .as_raw()
-                .to_owned(),
-            "jpg" => image::load_from_memory_with_format(&self.payload, image::ImageFormat::Jpeg)
-                .ok()?
-                .into_rgba8()
-                .as_raw()
-                .to_owned(),
-            "dxt1" => bcndecode::decode(
-                &self.payload,
-                w,
-                h,
-                bcndecode::BcnEncoding::Bc1,
-                bcndecode::BcnDecoderFormat::RGBA,
-            )
-            .ok()?,
-            "dxt5" => bcndecode::decode(
-                &self.payload,
-                w,
-                h,
-                bcndecode::BcnEncoding::Bc3,
-                bcndecode::BcnDecoderFormat::RGBA,
-            )
-            .ok()?,
+        match self.extension.as_str() {
+            "png" => {
+                let img = image::load_from_memory_with_format(&self.payload, image::ImageFormat::Png)
+                    .ok()?
+                    .into_rgba8();
+                let (dw, dh) = img.dimensions();
+                self.dimension = [dw, dh];
+                self.payload = img.as_raw().to_owned();
+            }
+            "jpg" => {
+                let img =
+                    image::load_from_memory_with_format(&self.payload, image::ImageFormat::Jpeg)
+                        .ok()?
+                        .into_rgba8();
+                let (dw, dh) = img.dimensions();
+                self.dimension = [dw, dh];
+                self.payload = img.as_raw().to_owned();
+            }
+            "dxt1" => {
+                self.payload = bcndecode::decode(
+                    &self.payload,
+                    w,
+                    h,
+                    bcndecode::BcnEncoding::Bc1,
+                    bcndecode::BcnDecoderFormat::RGBA,
+                )
+                .ok()?;
+            }
+            "dxt5" => {
+                self.payload = bcndecode::decode(
+                    &self.payload,
+                    w,
+                    h,
+                    bcndecode::BcnEncoding::Bc3,
+                    bcndecode::BcnDecoderFormat::RGBA,
+                )
+                .ok()?;
+            }
             // R8, RG88, mp4, and gif are kept in their native format.
             // They will be uploaded with the correct GPU format (R8Unorm / Rg8Unorm)
             // by the renderer, not expanded to RGBA here.
-            "mp4" | "gif" | "rg88" | "r8" => self.payload.clone(),
+            "mp4" | "gif" | "rg88" | "r8" => {}
             _ => return None,
         };
 
