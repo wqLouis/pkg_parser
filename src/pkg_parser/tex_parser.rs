@@ -206,24 +206,20 @@ impl Tex {
                 self.payload = img.as_raw().to_owned();
             }
             "dxt1" => {
-                self.payload = bcndecode::decode(
-                    &self.payload,
-                    w,
-                    h,
-                    bcndecode::BcnEncoding::Bc1,
-                    bcndecode::BcnDecoderFormat::RGBA,
-                )
-                .ok()?;
+                // BCn compressed textures are uploaded directly to the GPU
+                // as Bc1RgbaUnormSrgb — no CPU decode needed.
+                // Just validate the payload is correctly sized for BC1 blocks.
+                let expected = w.div_ceil(4) * h.div_ceil(4) * 8;
+                if self.payload.len() != expected {
+                    log::warn!("dxt1 size mismatch: got {} bytes, expected {}", self.payload.len(), expected);
+                }
             }
             "dxt5" => {
-                self.payload = bcndecode::decode(
-                    &self.payload,
-                    w,
-                    h,
-                    bcndecode::BcnEncoding::Bc3,
-                    bcndecode::BcnDecoderFormat::RGBA,
-                )
-                .ok()?;
+                // BC3: 16 bytes per 4×4 block. Pass through to GPU unchanged.
+                let expected = w.div_ceil(4) * h.div_ceil(4) * 16;
+                if self.payload.len() != expected {
+                    log::warn!("dxt5 size mismatch: got {} bytes, expected {}", self.payload.len(), expected);
+                }
             }
             // R8, RG88, mp4, and gif are kept in their native format.
             // They will be uploaded with the correct GPU format (R8Unorm / Rg8Unorm)
