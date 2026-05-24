@@ -118,16 +118,14 @@ impl Pkg {
             let output_path = target.join(path);
             let ext = Path::new(path)
                 .extension()
-                .unwrap_or_default()
-                .to_str()
-                .unwrap_or_default()
-                .to_lowercase();
+                .and_then(|e| e.to_str())
+                .unwrap_or_default();
 
-            if parse_tex && ext == "tex" {
+            if parse_tex && ext.eq_ignore_ascii_case("tex") {
                 save_tex_file(path, bytes, &output_path, dry_run);
-            } else if parse_video && matches!(ext.as_str(), "mp4" | "webm" | "gif") {
+            } else if parse_video && (ext.eq_ignore_ascii_case("mp4") || ext.eq_ignore_ascii_case("webm") || ext.eq_ignore_ascii_case("gif")) {
                 save_video_file(path, bytes, &output_path, dry_run);
-            } else if parse_mdl && ext == "mdl" {
+            } else if parse_mdl && ext.eq_ignore_ascii_case("mdl") {
                 save_mdl_file(path, bytes, &output_path, dry_run);
             } else if !dry_run {
                 create_dir_all(output_path.parent().unwrap()).unwrap();

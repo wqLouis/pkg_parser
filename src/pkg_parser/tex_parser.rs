@@ -1,6 +1,29 @@
-use std::io::{BufReader, Cursor, Read};
-
 use image::{ImageBuffer, Rgba};
+use std::io::Cursor;
+
+/// Helper: read a little-endian u32 from `bytes` at `offset`, advancing `offset` by 4.
+#[inline(always)]
+fn read_u32(bytes: &[u8], offset: &mut usize) -> Option<u32> {
+    let b: &[u8; 4] = bytes.get(*offset..*offset + 4)?.try_into().ok()?;
+    *offset += 4;
+    Some(u32::from_le_bytes(*b))
+}
+
+/// Helper: skip `n` bytes (used for padding / reserved fields).
+#[inline(always)]
+fn skip(bytes: &[u8], offset: &mut usize, n: usize) -> Option<()> {
+    if *offset + n > bytes.len() { return None; }
+    *offset += n;
+    Some(())
+}
+
+/// Read 8 bytes as a raw array (used for magic/version strings).
+#[inline(always)]
+fn read_magic(bytes: &[u8], offset: &mut usize) -> Option<[u8; 8]> {
+    let b: &[u8; 8] = bytes.get(*offset..*offset + 8)?.try_into().ok()?;
+    *offset += 8;
+    Some(*b)
+}
 
 #[derive(Debug, Clone)]
 pub struct Tex {
@@ -18,61 +41,74 @@ pub struct Tex {
 }
 
 impl Tex {
+    /// Parse a .tex file from raw bytes using direct byte slicing (no BufReader overhead).
     pub fn new(bytes: &[u8]) -> Option<Tex> {
-        let mut buf = BufReader::new(Cursor::new(bytes));
+        let mut pos: usize = 0;
 
-        // Read magic/version strings
-        let mut magic = [0u8; 8];
-        buf.read_exact(&mut magic).ok()?;
-        let texv = String::from_utf8_lossy(&magic).into_owned();
+        // Magic/version: TEXV0005 (8 bytes)
+        let texv_magic = read_magic(bytes, &mut pos)?;
+        let texv = String::from_utf8_lossy(&texv_magic).into_owned();
 
-        buf.seek_relative(1).ok()?;
-        buf.read_exact(&mut magic).ok()?;
-        let texi = String::from_utf8_lossy(&magic).into_owned();
+        // Padding byte
+        skip(bytes, &mut pos, 1)?;
 
-        // Format and dimensions
-        buf.seek_relative(1).ok()?;
-        let mut u32_buf = [0u8; 4];
-        buf.read_exact(&mut u32_buf).ok()?;
-        let format = u32::from_le_bytes(u32_buf);
+        // TEXI0002 (8 bytes)
+        let texi_magic = read_magic(bytes, &mut pos)?;
+        let texi = String::from_utf8_lossy(&texi_magic).into_owned();
 
-        buf.seek_relative(4).ok()?;
-        buf.read_exact(&mut u32_buf).ok()?;
-        let w = u32::from_le_bytes(u32_buf);
-        buf.read_exact(&mut u32_buf).ok()?;
-        let h = u32::from_le_bytes(u32_buf);
+        // Padding byte
+        skip(bytes, &mut pos, 1)?;
 
-        // Block magic
-        buf.seek_relative(12).ok()?;
-        buf.read_exact(&mut magic).ok()?;
-        let texb = String::from_utf8_lossy(&magic).into_owned();
+        // Format (u32)
+        let format = read_u32(bytes, &mut pos)?;
 
-        // Image and mipmap count
-        buf.seek_relative(1).ok()?;
-        buf.read_exact(&mut u32_buf).ok()?;
-        let image_count = u32::from_le_bytes(u32_buf);
+        // Reserved (4 bytes)
+        skip(bytes, &mut pos, 4)?;
 
-        buf.seek_relative(8).ok()?;
-        let mut mipmap_count = 0u32;
-        if texb == "TEXB0004" {
-            buf.read_exact(&mut u32_buf).ok()?;
-            mipmap_count = u32::from_le_bytes(u32_buf);
-        }
+        // Width, Height (u32 × 2)
+        let w = read_u32(bytes, &mut pos)?;
+        let h = read_u32(bytes, &mut pos)?;
 
-        // LZ4 flag and sizes
-        buf.seek_relative(8).ok()?;
-        buf.read_exact(&mut u32_buf).ok()?;
-        let lz4 = u32::from_le_bytes(u32_buf) == 1;
-        buf.read_exact(&mut u32_buf).ok()?;
-        let decompressed_size = u32::from_le_bytes(u32_buf);
-        buf.read_exact(&mut u32_buf).ok()?;
-        let payload_size = u32::from_le_bytes(u32_buf);
+        // 12 bytes reserved/padding
+        skip(bytes, &mut pos, 12)?;
 
-        // Payload
-        let mut payload = vec![0u8; payload_size as usize];
-        buf.read_exact(&mut payload).ok()?;
+        // TEXB0003 or TEXB0004 (8 bytes)
+        let texb_magic = read_magic(bytes, &mut pos)?;
+        let texb = String::from_utf8_lossy(&texb_magic).into_owned();
 
-        // Determine extension (before LZ4 decompression — raw magic bytes live in the compressed payload)
+        // Padding byte
+        skip(bytes, &mut pos, 1)?;
+
+        // Image count (u32)
+        let image_count = read_u32(bytes, &mut pos)?;
+
+        // 8 bytes reserved
+        skip(bytes, &mut pos, 8)?;
+
+        // Mipmap count (only in TEXB0004)
+        let mipmap_count = if texb_magic[7] == b'4' {
+            read_u32(bytes, &mut pos)?
+        } else {
+            0
+        };
+
+        // 8 bytes reserved
+        skip(bytes, &mut pos, 8)?;
+
+        // LZ4 flag (u32)
+        let lz4 = read_u32(bytes, &mut pos)? == 1;
+
+        // Decompressed size (u32)
+        let decompressed_size = read_u32(bytes, &mut pos)?;
+
+        // Payload size (u32)
+        let payload_size = read_u32(bytes, &mut pos)? as usize;
+
+        // Read payload via direct slice (avoids zero-initialized Vec + read_exact)
+        let payload = bytes.get(pos..pos + payload_size)?.to_vec();
+
+        // Determine extension (before LZ4 decompression — raw magic bytes live
+        // in the compressed payload; only format==0 has uncompressed embedded images)
         let extension = match format {
             0 => match_signature(&payload),
             7 => "dxt1",
@@ -84,15 +120,17 @@ impl Tex {
         let extension = extension.to_owned();
 
         // Decompress if LZ4
-        if lz4 {
-            payload = lz4_flex::block::decompress(&payload, decompressed_size as usize).ok()?;
-        }
+        let payload = if lz4 {
+            lz4_flex::block::decompress(&payload, decompressed_size as usize).ok()?
+        } else {
+            payload
+        };
 
         Some(Tex {
             texv,
             texi,
             texb,
-            size: payload_size,
+            size: payload_size as u32,
             dimension: [w, h],
             image_count,
             mipmap_count,

@@ -1,18 +1,37 @@
-use std::io::{BufReader, Cursor, Read, Seek};
 use serde::Serialize;
 
-/// Read a null-terminated UTF-8 string from a reader.
-fn read_cstring<R: Read>(reader: &mut R) -> Option<String> {
-    let mut bytes = Vec::new();
-    loop {
-        let mut byte = [0u8; 1];
-        reader.read_exact(&mut byte).ok()?;
-        if byte[0] == 0 {
-            break;
-        }
-        bytes.push(byte[0]);
-    }
-    Some(String::from_utf8_lossy(&bytes).into_owned())
+// ── Inline byte-slicing helpers ────────────────────────────────────────────
+
+#[inline(always)]
+fn read_u32_le(bytes: &[u8], pos: &mut usize) -> Option<u32> {
+    let b: &[u8; 4] = bytes.get(*pos..*pos + 4)?.try_into().ok()?;
+    *pos += 4;
+    Some(u32::from_le_bytes(*b))
+}
+
+#[inline(always)]
+fn read_u16_le(bytes: &[u8], pos: &mut usize) -> Option<u16> {
+    let b: &[u8; 2] = bytes.get(*pos..*pos + 2)?.try_into().ok()?;
+    *pos += 2;
+    Some(u16::from_le_bytes(*b))
+}
+
+#[inline(always)]
+fn read_f32_le(bytes: &[u8], pos: &mut usize) -> Option<f32> {
+    let b: &[u8; 4] = bytes.get(*pos..*pos + 4)?.try_into().ok()?;
+    *pos += 4;
+    Some(f32::from_le_bytes(*b))
+}
+
+/// Read a null-terminated UTF-8 string from a byte slice starting at `offset`.
+/// Uses `iter().position()` for fast SIMD-accelerated null-byte search.
+/// Advances `offset` past the null terminator.
+fn read_cstring(bytes: &[u8], offset: &mut usize) -> Option<String> {
+    let remaining = bytes.get(*offset..)?;
+    let null_pos = remaining.iter().position(|&b| b == 0)?;
+    let s = String::from_utf8_lossy(&remaining[..null_pos]).into_owned();
+    *offset += null_pos + 1;
+    Some(s)
 }
 
 /// Parsed MDL (puppet model) file.
@@ -114,15 +133,14 @@ pub struct Animation {
 }
 
 impl MdlFile {
-    /// Parse an MDL file from raw bytes.
+    /// Parse an MDL file from raw bytes using direct byte slicing.
     pub fn new(bytes: &[u8]) -> Option<MdlFile> {
-        let mut cursor = Cursor::new(bytes);
-        let mut buf_reader = BufReader::new(&mut cursor);
+        let mut pos: usize = 0;
 
-        let header = MdlvHeader::parse(&mut buf_reader, bytes)?;
-        let data = MdlvData::parse(&mut buf_reader, bytes, header.header_size)?;
-        let bones = Bones::parse(&mut buf_reader, bytes)?;
-        let animation = Animation::parse(&mut buf_reader, bytes)?;
+        let header = MdlvHeader::parse(bytes, &mut pos)?;
+        let data = MdlvData::parse(bytes, &mut pos, header.header_size)?;
+        let bones = Bones::parse(bytes, &mut pos)?;
+        let animation = Animation::parse(bytes, &mut pos)?;
 
         Some(MdlFile {
             header,
@@ -144,42 +162,33 @@ impl MdlFile {
 }
 
 impl MdlvHeader {
-    fn parse<R: Read + Seek>(reader: &mut R, bytes: &[u8]) -> Option<MdlvHeader> {
-        let mut magic_buf = [0u8; 8];
-        reader.read_exact(&mut magic_buf).ok()?;
-        let magic = String::from_utf8_lossy(&magic_buf).into_owned();
-        if magic != "MDLV0023" {
+    fn parse(bytes: &[u8], pos: &mut usize) -> Option<MdlvHeader> {
+        // Magic: MDLV0023 (8 bytes)
+        let magic = bytes.get(*pos..*pos + 8)?;
+        if magic != b"MDLV0023" {
             return None;
         }
+        *pos += 8;
 
-        let mut u32_buf = [0u8; 4];
-        reader.read_exact(&mut u32_buf).ok()?;
-        let type_val = u32::from_le_bytes(u32_buf);
-
-        let mut u16_buf = [0u8; 2];
-        reader.read_exact(&mut u16_buf).ok()?;
-        let sub_version = u16::from_le_bytes(u16_buf);
-
-        reader.read_exact(&mut u16_buf).ok()?;
-        let flags = u16::from_le_bytes(u16_buf);
-
-        reader.read_exact(&mut u32_buf).ok()?;
-        let unknown_16 = u32::from_le_bytes(u32_buf);
+        let type_val = read_u32_le(bytes, pos)?;
+        let sub_version = read_u16_le(bytes, pos)?;
+        let flags = read_u16_le(bytes, pos)?;
+        let unknown_16 = read_u32_le(bytes, pos)?;
 
         // Padding byte at offset 20
-        let mut pad_byte = [0u8; 1];
-        reader.read_exact(&mut pad_byte).ok()?;
+        *pos += 1;
 
-        // Material path at offset 21+
-        let material_path = read_cstring(reader)?;
+        // Material path
+        let material_path = read_cstring(bytes, pos)?;
 
-        let header_size = bytes
+        let header_size = bytes[*pos..]
             .windows(4)
             .position(|w| w == [0x00, 0x0f, 0x00, 0x80])
+            .map(|p| *pos + p)
             .unwrap_or(bytes.len());
 
         Some(MdlvHeader {
-            magic,
+            magic: "MDLV0023".to_string(),
             type_val,
             sub_version,
             flags,
@@ -191,27 +200,24 @@ impl MdlvHeader {
 }
 
 impl MdlvData {
-    fn parse<R: Read + Seek>(reader: &mut R, bytes: &[u8], data_start: usize) -> Option<MdlvData> {
-        reader
-            .seek(std::io::SeekFrom::Start(data_start as u64))
-            .ok()?;
+    fn parse(bytes: &[u8], pos: &mut usize, data_start: usize) -> Option<MdlvData> {
+        *pos = data_start;
 
-        let mut marker_buf = [0u8; 4];
-        reader.read_exact(&mut marker_buf).ok()?;
-        let marker_type = u32::from_le_bytes(marker_buf);
+        // Marker: 0x80000F00 (4 bytes)
+        let marker_type = read_u32_le(bytes, pos)?;
         if marker_type != 0x80000F00 {
             return None;
         }
 
-        let mut type_byte = [0u8; 1];
-        reader.read_exact(&mut type_byte).ok()?;
+        // Skip type byte
+        *pos += 1;
 
-        let mut size_buf = [0u8; 3];
-        reader.read_exact(&mut size_buf).ok()?;
-        let record_block_size =
-            u32::from_le_bytes([size_buf[0], size_buf[1], size_buf[2], 0]);
+        // 3-byte record block size
+        let b = bytes.get(*pos..*pos + 3)?;
+        *pos += 3;
+        let record_block_size = u32::from_le_bytes([b[0], b[1], b[2], 0]);
 
-        // Parse control point records
+        // Parse control point records (each 80 bytes)
         let record_start = data_start + 8;
         let record_end = record_start + record_block_size as usize;
         let record_size = 80usize;
@@ -227,8 +233,14 @@ impl MdlvData {
         }
 
         // Parse remaining data (between records and MDLS) as triangles
-        let mdls_pos = bytes.windows(4).position(|w| w == b"MDLS")?;
+        let mdls_pos = bytes[record_end..]
+            .windows(4)
+            .position(|w| w == b"MDLS")
+            .map(|p| record_end + p)
+            .unwrap_or(bytes.len());
         let triangles = Self::parse_triangles_from_gap(bytes, record_end, mdls_pos);
+
+        *pos = mdls_pos;
 
         Some(MdlvData {
             marker_type,
@@ -301,47 +313,35 @@ impl ControlPoint {
 }
 
 impl Bones {
-    fn parse<R: Read + Seek>(reader: &mut R, bytes: &[u8]) -> Option<Bones> {
-        let mdls_start = bytes.windows(4).position(|w| w == b"MDLS")?;
-        reader.seek(std::io::SeekFrom::Start(mdls_start as u64)).ok()?;
+    fn parse(bytes: &[u8], pos: &mut usize) -> Option<Bones> {
+        let header = read_cstring(bytes, pos)?;
 
-        let header = read_cstring(reader)?;
-
-        let mut u32_buf = [0u8; 4];
-        reader.read_exact(&mut u32_buf).ok()?;
-        let _next_offset = u32::from_le_bytes(u32_buf);
-
-        reader.read_exact(&mut u32_buf).ok()?;
-        let num_bones = u32::from_le_bytes(u32_buf);
+        let _next_offset = read_u32_le(bytes, pos)?;
+        let num_bones = read_u32_le(bytes, pos)?;
 
         let mut bones = Vec::with_capacity(num_bones as usize);
         for i in 0..num_bones {
-            let mut tmp = [0u8; 1];
-            reader.read_exact(&mut tmp).ok()?;
-            reader.read_exact(&mut u32_buf).ok()?;
-            let bone_type = u32::from_le_bytes(u32_buf);
-            reader.read_exact(&mut u32_buf).ok()?;
-            let unk1 = u32::from_le_bytes(u32_buf);
-
-            reader.read_exact(&mut u32_buf).ok()?;
-            let entry_byte_len = u32::from_le_bytes(u32_buf);
+            let tmp = *bytes.get(*pos)?;
+            *pos += 1;
+            let bone_type = read_u32_le(bytes, pos)?;
+            let unk1 = read_u32_le(bytes, pos)?;
+            let entry_byte_len = read_u32_le(bytes, pos)?;
 
             let num_floats = entry_byte_len as usize / 4;
             let mut matrix = [0.0f32; 16];
             for j in 0..num_floats.min(16) {
-                let mut f32_buf = [0u8; 4];
-                reader.read_exact(&mut f32_buf).ok()?;
-                matrix[j] = f32::from_le_bytes(f32_buf);
+                let f = read_f32_le(bytes, pos)?;
+                matrix[j] = f;
             }
             if num_floats > 16 {
-                reader.seek(std::io::SeekFrom::Current((num_floats - 16) as i64 * 4)).ok()?;
+                *pos += (num_floats - 16) * 4;
             }
 
-            let info = read_cstring(reader)?;
+            let info = read_cstring(bytes, pos)?;
 
             bones.push(BoneEntry {
                 index: i,
-                tmp: tmp[0],
+                tmp,
                 bone_type,
                 unk1,
                 matrix,
@@ -354,27 +354,19 @@ impl Bones {
 }
 
 impl Animation {
-    fn parse<R: Read + Seek>(reader: &mut R, bytes: &[u8]) -> Option<Animation> {
-        let mdla_start = bytes.windows(4).position(|w| w == b"MDLA")?;
-        reader.seek(std::io::SeekFrom::Start(mdla_start as u64)).ok()?;
+    fn parse(bytes: &[u8], pos: &mut usize) -> Option<Animation> {
+        let header = read_cstring(bytes, pos)?;
 
-        let header = read_cstring(reader)?;
+        let end_offset = read_u32_le(bytes, pos)?;
+        let num_animations = read_u32_le(bytes, pos)?;
+        let num_frames = read_u32_le(bytes, pos)?;
+        let _unk = read_u32_le(bytes, pos)?;
 
-        let mut u32_buf = [0u8; 4];
-        reader.read_exact(&mut u32_buf).ok()?;
-        let end_offset = u32::from_le_bytes(u32_buf);
-        reader.read_exact(&mut u32_buf).ok()?;
-        let num_animations = u32::from_le_bytes(u32_buf);
-        reader.read_exact(&mut u32_buf).ok()?;
-        let num_frames = u32::from_le_bytes(u32_buf);
-        reader.read_exact(&mut u32_buf).ok()?;
-        let _unk = u32::from_le_bytes(u32_buf);
+        let animation_name = read_cstring(bytes, pos).unwrap_or_default();
+        let loop_mode = read_cstring(bytes, pos).unwrap_or_default();
 
-        let animation_name = read_cstring(reader).unwrap_or_default();
-        let loop_mode = read_cstring(reader).unwrap_or_default();
-
-        let data_start = reader.stream_position().ok()? as usize;
-        let animation_data = bytes[data_start..].to_vec();
+        let animation_data = bytes[*pos..].to_vec();
+        *pos = bytes.len();
 
         Some(Animation {
             header,
