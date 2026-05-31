@@ -37,7 +37,12 @@ pub struct Tex {
     pub lz4: bool,
     pub decompressed_size: u32,
     pub extension: String,
+    /// Level 0 (full-resolution) payload. For BCn textures this is only
+    /// the top-level block data; remaining mip levels are in [`mip_levels`].
     pub payload: Vec<u8>,
+    /// Remaining mip levels (level 1..mipmap_count), each stored as raw bytes.
+    /// Empty if mipmap_count <= 1 or if mips were generated separately.
+    pub mip_levels: Vec<Vec<u8>>,
 }
 
 impl Tex {
@@ -138,7 +143,110 @@ impl Tex {
             decompressed_size,
             payload,
             extension,
+            mip_levels: Vec::new(),
         })
+    }
+
+    /// Build a full mipmap chain from the decoded image data.
+    ///
+    /// For BCn compressed textures (dxt1/dxt5): splits the concatenated payload
+    /// into individual mip levels, each containing raw block-compressed data.
+    ///
+    /// For uncompressed formats (RGBA after PNG/JPEG decode, or R8/RG88):
+    /// generates mip levels via CPU box-filter downsampling.
+    ///
+    /// After calling this, `payload` contains only level 0, and `mip_levels`
+    /// contains levels 1..n in order.
+    pub fn build_mip_chain(&mut self) {
+        if self.mipmap_count <= 1 {
+            return;
+        }
+
+        match self.extension.as_str() {
+            "dxt1" | "dxt5" => self.split_bcn_mip_levels(),
+            _ => self.generate_mipmaps_rgba(),
+        }
+    }
+
+    /// Split BCn payload into individual mip levels.
+    /// BCn mip levels are concatenated: level0 + level1 + ... + level(N-1).
+    /// Each level's size is determined by its dimensions (halved each level).
+    fn split_bcn_mip_levels(&mut self) {
+        let (w, h) = (self.dimension[0] as usize, self.dimension[1] as usize);
+        let block_size = if self.extension == "dxt1" { 8 } else { 16 };
+
+        let mut offset = 0usize;
+        let mut level_w = w;
+        let mut level_h = h;
+        let mut levels: Vec<Vec<u8>> = Vec::with_capacity(self.mipmap_count as usize);
+
+        for _ in 0..self.mipmap_count {
+            let blocks_w = level_w.div_ceil(4);
+            let blocks_h = level_h.div_ceil(4);
+            let level_size = blocks_w * blocks_h * block_size;
+
+            if offset + level_size > self.payload.len() {
+                log::warn!(
+                    "BCn mip level exceeds payload: offset={} size={} payload_len={}",
+                    offset, level_size, self.payload.len()
+                );
+                break;
+            }
+
+            let level_data = self.payload[offset..offset + level_size].to_vec();
+            levels.push(level_data);
+            offset += level_size;
+
+            level_w = (level_w / 2).max(1);
+            level_h = (level_h / 2).max(1);
+        }
+
+        if levels.is_empty() {
+            return;
+        }
+
+        // Level 0 stays in payload; rest go to mip_levels.
+        self.payload = levels.remove(0);
+        self.mip_levels = levels;
+        // Update dimension to level 0 size (may differ from header if header
+        // was the full mip-chain size or if some levels were truncated).
+        self.dimension = [w as u32, h as u32];
+    }
+
+    /// Generate mipmaps from RGBA pixel data via box-filter downsampling.
+    /// Works for RGBA8 (4 bytes/pixel), R8 (1 byte/pixel), RG88 (2 bytes/pixel).
+    fn generate_mipmaps_rgba(&mut self) {
+        let (w, h) = (self.dimension[0] as usize, self.dimension[1] as usize);
+        let bpp = match self.extension.as_str() {
+            "r8" => 1,
+            "rg88" => 2,
+            _ => 4, // RGBA, PNG, JPEG decoded
+        };
+
+        if self.payload.len() < w * h * bpp {
+            return;
+        }
+
+        let mut prev = &self.payload[..];
+        let mut prev_w = w;
+        let mut prev_h = h;
+
+        for _ in 1..self.mipmap_count {
+            let next_w = (prev_w / 2).max(1);
+            let next_h = (prev_h / 2).max(1);
+
+            if next_w == prev_w && next_h == prev_h {
+                break; // Can't reduce further
+            }
+
+            let mut next = vec![0u8; next_w * next_h * bpp];
+            downsample_box(prev, prev_w, prev_h, bpp, &mut next, next_w, next_h);
+            self.mip_levels.push(next);
+
+            prev = &self.mip_levels.last().unwrap()[..];
+            prev_w = next_w;
+            prev_h = next_h;
+        }
     }
 
     pub fn parse_to_image(&self) -> Option<(Vec<u8>, String)> {
@@ -270,4 +378,44 @@ fn raw_to_png(bytes: Vec<u8>, w: u32, h: u32) -> Option<(Vec<u8>, String)> {
         .write_to(&mut cur, image::ImageFormat::Png)
         .ok()?;
     Some((buf, "png".to_owned()))
+}
+
+/// Box-filter downsampling: average 2×2 pixel blocks into 1 pixel.
+/// `src` has dimensions `sw × sh` with `bpp` bytes per pixel.
+/// `dst` is pre-allocated with size `dw × dh × bpp`.
+fn downsample_box(src: &[u8], sw: usize, sh: usize, bpp: usize, dst: &mut [u8], dw: usize, dh: usize) {
+    let scale_x = sw as f32 / dw as f32;
+    let scale_y = sh as f32 / dh as f32;
+
+    for dy in 0..dh {
+        let src_y0 = (dy as f32 * scale_y) as usize;
+        let src_y1 = ((dy + 1) as f32 * scale_y).ceil() as usize;
+        let src_y1 = src_y1.min(sh);
+
+        for dx in 0..dw {
+            let src_x0 = (dx as f32 * scale_x) as usize;
+            let src_x1 = ((dx + 1) as f32 * scale_x).ceil() as usize;
+            let src_x1 = src_x1.min(sw);
+
+            let dst_off = (dy * dw + dx) * bpp;
+            let mut sum = vec![0u32; bpp];
+            let mut count = 0u32;
+
+            for sy in src_y0..src_y1 {
+                for sx in src_x0..src_x1 {
+                    let src_off = (sy * sw + sx) * bpp;
+                    for c in 0..bpp {
+                        sum[c] += src[src_off + c] as u32;
+                    }
+                    count += 1;
+                }
+            }
+
+            if count > 0 {
+                for c in 0..bpp {
+                    dst[dst_off + c] = (sum[c] / count) as u8;
+                }
+            }
+        }
+    }
 }
