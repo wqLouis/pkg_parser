@@ -201,6 +201,11 @@ impl MdlvHeader {
 
 impl MdlvData {
     fn parse(bytes: &[u8], pos: &mut usize, data_start: usize) -> Option<MdlvData> {
+        // Guard against bogus data_start (must not exceed the buffer)
+        if data_start + 8 > bytes.len() {
+            return None;
+        }
+
         *pos = data_start;
 
         // Marker: 0x80000F00 (4 bytes)
@@ -219,9 +224,16 @@ impl MdlvData {
 
         // Parse control point records (each 80 bytes)
         let record_start = data_start + 8;
-        let record_end = record_start + record_block_size as usize;
         let record_size = 80usize;
         let num_records = record_block_size as usize / record_size;
+
+        // Sanity checks to avoid overflow / huge allocations on malformed data
+        let Some(record_end) = record_start.checked_add(record_block_size as usize) else {
+            return None;
+        };
+        if record_end > bytes.len() || num_records > bytes.len() / record_size {
+            return None;
+        }
 
         let mut records = Vec::with_capacity(num_records);
         for i in 0..num_records {
@@ -232,11 +244,15 @@ impl MdlvData {
             records.push(ControlPoint::parse(bytes, off, i as u32));
         }
 
-        // Parse remaining data (between records and MDLS) as triangles
-        let mdls_pos = bytes[record_end..]
-            .windows(4)
-            .position(|w| w == b"MDLS")
-            .map(|p| record_end + p)
+        // Parse remaining data (between records and MDLS) as triangles.
+        // Use .get() to avoid panicking if record_end is out of bounds.
+        let mdls_pos = bytes
+            .get(record_end..)
+            .and_then(|tail| {
+                tail.windows(4)
+                    .position(|w| w == b"MDLS")
+                    .map(|p| record_end + p)
+            })
             .unwrap_or(bytes.len());
         let triangles = Self::parse_triangles_from_gap(bytes, record_end, mdls_pos);
 
@@ -259,6 +275,9 @@ impl MdlvData {
     ) -> Vec<Triangle> {
         let mut triangles = Vec::new();
 
+        // Clamp mdls_pos to bytes.len() to avoid out-of-bounds access
+        let mdls_pos = mdls_pos.min(bytes.len());
+
         if mdls_pos < start + 5 + 6 {
             return triangles;
         }
@@ -271,9 +290,13 @@ impl MdlvData {
         let mut i = 0;
         while i + 3 <= max_u16 {
             let off = data_start + i * 2;
-            let a = u16::from_le_bytes([bytes[off], bytes[off + 1]]);
-            let b = u16::from_le_bytes([bytes[off + 2], bytes[off + 3]]);
-            let c = u16::from_le_bytes([bytes[off + 4], bytes[off + 5]]);
+            // Use .get() for safe bounds-checked access
+            let Some(chunk) = bytes.get(off..off + 6) else {
+                break;
+            };
+            let a = u16::from_le_bytes([chunk[0], chunk[1]]);
+            let b = u16::from_le_bytes([chunk[2], chunk[3]]);
+            let c = u16::from_le_bytes([chunk[4], chunk[5]]);
             triangles.push(Triangle { a, b, c });
             i += 3;
         }
@@ -365,7 +388,7 @@ impl Animation {
         let animation_name = read_cstring(bytes, pos).unwrap_or_default();
         let loop_mode = read_cstring(bytes, pos).unwrap_or_default();
 
-        let animation_data = bytes[*pos..].to_vec();
+        let animation_data = bytes.get(*pos..).unwrap_or(&[]).to_vec();
         *pos = bytes.len();
 
         Some(Animation {

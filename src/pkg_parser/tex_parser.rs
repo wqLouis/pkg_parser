@@ -243,7 +243,10 @@ impl Tex {
             downsample_box(prev, prev_w, prev_h, bpp, &mut next, next_w, next_h);
             self.mip_levels.push(next);
 
-            prev = &self.mip_levels.last().unwrap()[..];
+            prev = match self.mip_levels.last() {
+                Some(l) => &l[..],
+                None => break,
+            };
             prev_w = next_w;
             prev_h = next_h;
         }

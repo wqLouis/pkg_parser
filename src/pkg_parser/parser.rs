@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     fs::{self, File, create_dir_all},
-    io::{BufReader, Read, Seek, SeekFrom},
+    io::{self, BufReader, Read, Seek, SeekFrom},
     path::Path,
 };
 
@@ -31,64 +31,70 @@ pub(self) struct Entry {
 }
 
 impl Pkg {
-    pub fn new(pkg_path: &Path) -> Pkg {
-        let mut file = BufReader::new(File::open(pkg_path).unwrap());
-        let header = Self::read_header(&mut file);
-        let entries = Self::read_entries(&mut file, header.file_count);
-        let files = Self::read_files(&mut file, &entries);
+    /// Open and parse a `.pkg` file.
+    ///
+    /// Returns `Ok(Pkg)` on success or `Err(io::Error)` if the file
+    /// cannot be read or contains malformed data.
+    pub fn new(pkg_path: &Path) -> Result<Pkg, io::Error> {
+        let mut file = BufReader::new(File::open(pkg_path)?);
+        let header = Self::read_header(&mut file)?;
+        let entries = Self::read_entries(&mut file, header.file_count)?;
+        let files = Self::read_files(&mut file, &entries)?;
 
-        Pkg { header, files }
+        Ok(Pkg { header, files })
     }
 
-    fn read_header(file: &mut BufReader<File>) -> Header {
+    fn read_header(file: &mut BufReader<File>) -> io::Result<Header> {
         let mut buf = [0u8; 4];
 
         // Version string
-        file.read_exact(&mut buf).unwrap();
+        file.read_exact(&mut buf)?;
         let version_len = u32::from_le_bytes(buf) as usize;
         let mut version_bytes = vec![0u8; version_len];
-        file.read_exact(&mut version_bytes).unwrap();
-        let version = String::from_utf8(version_bytes).unwrap();
+        file.read_exact(&mut version_bytes)?;
+        let version = String::from_utf8(version_bytes)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
         // File count
-        file.read_exact(&mut buf).unwrap();
+        file.read_exact(&mut buf)?;
         let file_count = u32::from_le_bytes(buf);
 
-        Header {
+        Ok(Header {
             version,
             file_count,
-        }
+        })
     }
 
-    fn read_entries(file: &mut BufReader<File>, entry_count: u32) -> Vec<Entry> {
+    fn read_entries(file: &mut BufReader<File>, entry_count: u32) -> io::Result<Vec<Entry>> {
         let mut entries = Vec::with_capacity(entry_count as usize);
         let mut buf = [0u8; 4];
 
         for _ in 0..entry_count {
             // Path
-            file.read_exact(&mut buf).unwrap();
+            file.read_exact(&mut buf)?;
             let path_len = u32::from_le_bytes(buf) as usize;
             let mut path_bytes = vec![0u8; path_len];
-            file.read_exact(&mut path_bytes).unwrap();
+            file.read_exact(&mut path_bytes)?;
 
             // Offset and size
-            file.read_exact(&mut buf).unwrap();
+            file.read_exact(&mut buf)?;
             let offset = u32::from_le_bytes(buf);
-            file.read_exact(&mut buf).unwrap();
+            file.read_exact(&mut buf)?;
             let size = u32::from_le_bytes(buf);
 
             entries.push(Entry {
-                path: String::from_utf8(path_bytes).unwrap(),
+                path: String::from_utf8(path_bytes)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
                 offset,
                 size,
             });
         }
 
-        entries
+        Ok(entries)
     }
 
-    fn read_files(file: &mut BufReader<File>, entries: &[Entry]) -> HashMap<String, Vec<u8>> {
-        let data_start = file.stream_position().unwrap();
+    fn read_files(file: &mut BufReader<File>, entries: &[Entry]) -> io::Result<HashMap<String, Vec<u8>>> {
+        let data_start = file.stream_position()?;
         let mut map = HashMap::with_capacity(entries.len());
 
         // Sort by offset to read sequentially and avoid random seeking
@@ -96,14 +102,13 @@ impl Pkg {
         sorted.sort_by_key(|e| e.offset);
 
         for entry in &sorted {
-            file.seek(SeekFrom::Start(entry.offset as u64 + data_start))
-                .unwrap();
+            file.seek(SeekFrom::Start(entry.offset as u64 + data_start))?;
             let mut buf = vec![0u8; entry.size as usize];
-            file.read_exact(&mut buf).unwrap();
+            file.read_exact(&mut buf)?;
             map.insert(entry.path.clone(), buf);
         }
 
-        map
+        Ok(map)
     }
 
     pub fn save_pkg(
