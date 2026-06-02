@@ -171,6 +171,10 @@ impl Tex {
     /// Split BCn payload into individual mip levels.
     /// BCn mip levels are concatenated: level0 + level1 + ... + level(N-1).
     /// Each level's size is determined by its dimensions (halved each level).
+    ///
+    /// If the payload doesn't contain enough data for all advertised mip
+    /// levels (common when the engine stores only level 0 and generates
+    /// mips at runtime), we silently stop at the last complete level.
     fn split_bcn_mip_levels(&mut self) {
         let (w, h) = (self.dimension[0] as usize, self.dimension[1] as usize);
         let block_size = if self.extension == "dxt1" { 8 } else { 16 };
@@ -178,18 +182,15 @@ impl Tex {
         let mut offset = 0usize;
         let mut level_w = w;
         let mut level_h = h;
-        let mut levels: Vec<Vec<u8>> = Vec::with_capacity(self.mipmap_count as usize);
+        let max_levels = self.mipmap_count as usize;
+        let mut levels: Vec<Vec<u8>> = Vec::with_capacity(max_levels);
 
-        for _ in 0..self.mipmap_count {
+        for _ in 0..max_levels {
             let blocks_w = level_w.div_ceil(4);
             let blocks_h = level_h.div_ceil(4);
             let level_size = blocks_w * blocks_h * block_size;
 
             if offset + level_size > self.payload.len() {
-                log::warn!(
-                    "BCn mip level exceeds payload: offset={} size={} payload_len={}",
-                    offset, level_size, self.payload.len()
-                );
                 break;
             }
 

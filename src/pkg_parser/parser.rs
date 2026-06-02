@@ -227,8 +227,9 @@ fn save_mdl_file(path: &str, bytes: &[u8], output_path: &Path, dry_run: bool) {
 
     log::info!("Puppet model: {}", path);
     log::debug!(
-        "  Records: {}, Triangles: {}",
+        "  Records: {}, Quads: {}, Triangles: {}",
         mdl.data.records.len(),
+        mdl.data.quads.len(),
         mdl.data.triangles.len()
     );
     log::debug!(

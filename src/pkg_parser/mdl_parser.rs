@@ -57,13 +57,16 @@ pub struct MdlvHeader {
     pub header_size: usize,
 }
 
-/// MDLV data section (control points and triangles).
+/// MDLV data section (control points, quads, and render triangles).
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MdlvData {
     pub marker_type: u32,
     pub record_block_size: u32,
     pub records: Vec<ControlPoint>,
+    /// Quad-derived triangles indexing into control points (vertex IDs < num_records).
+    pub quads: Vec<Triangle>,
+    /// Render triangles derived from tessellating quads (vertex IDs may exceed num_records).
     pub triangles: Vec<Triangle>,
 }
 
@@ -72,22 +75,34 @@ pub struct MdlvData {
 #[serde(rename_all = "camelCase")]
 pub struct ControlPoint {
     pub index: u32,
-    pub pos_x: i16,
-    pub pos_y: i16,
-    pub tex_u: i16,
-    pub tex_v: i16,
+    /// Normalized position X (raw i16 / 32767 → range ≈ [-1, 1])
+    pub pos_x: f32,
+    /// Normalized position Y (raw i16 / 32767 → range ≈ [-1, 1])
+    pub pos_y: f32,
+    /// Normalized texture U coordinate (raw i16 / 32767 → range ≈ [-1, 1])
+    pub tex_u: f32,
+    /// Normalized texture V coordinate (raw i16 / 32767 → range ≈ [-1, 1])
+    pub tex_v: f32,
+    /// Group identifier (shared by control points of the same mesh part).
     pub group_id: u32,
+    /// Sub-group index.
     pub sub_group: u32,
+    /// Sub-sub-group index.
     pub sub_sub_group: u32,
-    pub field_0: u32,
-    pub field_4: u32,
-    pub field_12: u32,
-    pub field_16: u32,
-    pub field_28: f32,
-    pub field_56: f32,
-    pub field_60: u32,
-    pub field_72: u32,
-    pub field_76: f32,
+    /// Deformation parameter / weight (only ~14 unique values across all points).
+    pub weight: f32,
+    /// Normalized deformation handle A, X component.
+    pub handle_a_x: f32,
+    /// Normalized deformation handle A, Y component.
+    pub handle_a_y: f32,
+    /// Normalized deformation handle B, X component.
+    pub handle_b_x: f32,
+    /// Normalized deformation handle B, Y component.
+    pub handle_b_y: f32,
+    /// Normalized deformation handle C, X component.
+    pub handle_c_x: f32,
+    /// Normalized deformation handle C, Y component.
+    pub handle_c_y: f32,
 }
 
 /// A triangle defined by 3 vertex indices.
@@ -254,7 +269,7 @@ impl MdlvData {
                     .map(|p| record_end + p)
             })
             .unwrap_or(bytes.len());
-        let triangles = Self::parse_triangles_from_gap(bytes, record_end, mdls_pos);
+        let (quads, triangles) = Self::parse_triangles_from_gap(bytes, record_end, mdls_pos);
 
         *pos = mdls_pos;
 
@@ -262,75 +277,117 @@ impl MdlvData {
             marker_type,
             record_block_size,
             records,
+            quads,
             triangles,
         })
     }
 
-    /// Parse the data between records_end and MDLS as triangles.
+    /// Parse the data between records_end and MDLS into two sections.
     ///
-    /// The data starts with a 5-byte header, followed by triangle index
-    /// triplets (3 × u16 per triangle).
+    /// The gap starts with a 5-byte header:
+    ///   byte[0]      — section type (0x3e or 0x3f)
+    ///   bytes[1..5]  — u32 LE: size in bytes of the quads triangle data
+    ///
+    /// After the quads data, the remaining bytes are the render triangles
+    /// section (derived from tessellating the quads; vertex indices may far
+    /// exceed the control point count).
     fn parse_triangles_from_gap(
         bytes: &[u8], start: usize, mdls_pos: usize,
-    ) -> Vec<Triangle> {
+    ) -> (Vec<Triangle>, Vec<Triangle>) {
+        let mut quads = Vec::new();
         let mut triangles = Vec::new();
 
-        // Clamp mdls_pos to bytes.len() to avoid out-of-bounds access
         let mdls_pos = mdls_pos.min(bytes.len());
-
         if mdls_pos < start + 5 + 6 {
-            return triangles;
+            return (quads, triangles);
         }
 
-        // Skip the 5-byte section header
-        let data_start = start + 5;
-        let gap_size = mdls_pos - data_start;
-        let max_u16 = gap_size / 2;
+        // Read 5-byte section header
+        let header = &bytes[start..start + 5];
+        let quads_data_size = u32::from_le_bytes([header[1], header[2], header[3], header[4]]) as usize;
 
-        let mut i = 0;
-        while i + 3 <= max_u16 {
-            let off = data_start + i * 2;
-            // Use .get() for safe bounds-checked access
+        let data_start = start + 5;
+        let gap_end = mdls_pos;
+
+        // Clamp quads_data_size to available data
+        let quads_end = data_start.saturating_add(quads_data_size).min(gap_end);
+
+        // Parse quads section
+        let mut off = data_start;
+        while off + 6 <= quads_end {
             let Some(chunk) = bytes.get(off..off + 6) else {
                 break;
             };
-            let a = u16::from_le_bytes([chunk[0], chunk[1]]);
-            let b = u16::from_le_bytes([chunk[2], chunk[3]]);
-            let c = u16::from_le_bytes([chunk[4], chunk[5]]);
-            triangles.push(Triangle { a, b, c });
-            i += 3;
+            quads.push(Triangle {
+                a: u16::from_le_bytes([chunk[0], chunk[1]]),
+                b: u16::from_le_bytes([chunk[2], chunk[3]]),
+                c: u16::from_le_bytes([chunk[4], chunk[5]]),
+            });
+            off += 6;
         }
 
-        triangles
+        // Parse render triangles section (remainder of gap)
+        off = quads_end;
+        while off + 6 <= gap_end {
+            let Some(chunk) = bytes.get(off..off + 6) else {
+                break;
+            };
+            triangles.push(Triangle {
+                a: u16::from_le_bytes([chunk[0], chunk[1]]),
+                b: u16::from_le_bytes([chunk[2], chunk[3]]),
+                c: u16::from_le_bytes([chunk[4], chunk[5]]),
+            });
+            off += 6;
+        }
+
+        (quads, triangles)
     }
 }
 
 impl ControlPoint {
     fn parse(bytes: &[u8], offset: usize, index: u32) -> ControlPoint {
-        let field_0 = u32::from_le_bytes([bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]]);
-        let field_4 = u32::from_le_bytes([bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7]]);
-
         let pos_x = i16::from_le_bytes([bytes[offset], bytes[offset + 1]]);
         let pos_y = i16::from_le_bytes([bytes[offset + 2], bytes[offset + 3]]);
         let tex_u = i16::from_le_bytes([bytes[offset + 4], bytes[offset + 5]]);
         let tex_v = i16::from_le_bytes([bytes[offset + 6], bytes[offset + 7]]);
-
         let group_id = u32::from_le_bytes([bytes[offset + 8], bytes[offset + 9], bytes[offset + 10], bytes[offset + 11]]);
-        let field_12 = u32::from_le_bytes([bytes[offset + 12], bytes[offset + 13], bytes[offset + 14], bytes[offset + 15]]);
-        let field_16 = u32::from_le_bytes([bytes[offset + 16], bytes[offset + 17], bytes[offset + 18], bytes[offset + 19]]);
-        let field_28 = f32::from_le_bytes([bytes[offset + 28], bytes[offset + 29], bytes[offset + 30], bytes[offset + 31]]);
+        // bytes 12–27: padding / markers (always 0 or constant 0x80000000)
+        let handle_a_x = i16::from_le_bytes([bytes[offset + 28], bytes[offset + 29]]);
+        let handle_a_y = i16::from_le_bytes([bytes[offset + 30], bytes[offset + 31]]);
         let sub_group = u32::from_le_bytes([bytes[offset + 32], bytes[offset + 33], bytes[offset + 34], bytes[offset + 35]]);
+        // bytes 36–39: marker (always 0x80000000)
+        let weight = i16::from_le_bytes([bytes[offset + 40], bytes[offset + 41]]);
+        // bytes 42–55: padding (always 0)
+        // bytes 56–59: marker (always 0x80000000)
+        // bytes 60–63: constant marker (always 0x3f000000 = 63)
         let sub_sub_group = u32::from_le_bytes([bytes[offset + 64], bytes[offset + 65], bytes[offset + 66], bytes[offset + 67]]);
-        let field_56 = f32::from_le_bytes([bytes[offset + 56], bytes[offset + 57], bytes[offset + 58], bytes[offset + 59]]);
-        let field_60 = u32::from_le_bytes([bytes[offset + 60], bytes[offset + 61], bytes[offset + 62], bytes[offset + 63]]);
-        let field_72 = u32::from_le_bytes([bytes[offset + 72], bytes[offset + 73], bytes[offset + 74], bytes[offset + 75]]);
-        let field_76 = f32::from_le_bytes([bytes[offset + 76], bytes[offset + 77], bytes[offset + 78], bytes[offset + 79]]);
+        // bytes 68–71: padding (always 0)
+        let handle_b_x = i16::from_le_bytes([bytes[offset + 72], bytes[offset + 73]]);
+        let handle_b_y = i16::from_le_bytes([bytes[offset + 74], bytes[offset + 75]]);
+        let handle_c_x = i16::from_le_bytes([bytes[offset + 76], bytes[offset + 77]]);
+        let handle_c_y = i16::from_le_bytes([bytes[offset + 78], bytes[offset + 79]]);
+
+        // Normalize i16 coords to f32 range ≈ [-1, 1]
+        const NORM: f32 = 32767.0;
+        let pos_x = pos_x as f32 / NORM;
+        let pos_y = pos_y as f32 / NORM;
+        let tex_u = tex_u as f32 / NORM;
+        let tex_v = tex_v as f32 / NORM;
+        let handle_a_x = handle_a_x as f32 / NORM;
+        let handle_a_y = handle_a_y as f32 / NORM;
+        let handle_b_x = handle_b_x as f32 / NORM;
+        let handle_b_y = handle_b_y as f32 / NORM;
+        let handle_c_x = handle_c_x as f32 / NORM;
+        let handle_c_y = handle_c_y as f32 / NORM;
+        // weight is a small positive parameter, normalize to [0, ~0.1]
+        let weight = weight as f32 / NORM;
 
         ControlPoint {
             index, pos_x, pos_y, tex_u, tex_v,
             group_id, sub_group, sub_sub_group,
-            field_0, field_4, field_12, field_16,
-            field_28, field_56, field_60, field_72, field_76,
+            weight, handle_a_x, handle_a_y,
+            handle_b_x, handle_b_y,
+            handle_c_x, handle_c_y,
         }
     }
 }
