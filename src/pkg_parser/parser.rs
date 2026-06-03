@@ -152,7 +152,12 @@ fn save_tex_file(path: &str, bytes: &[u8], output_path: &Path, dry_run: bool) {
     log::debug!("  Texi: {}", tex.texi);
     log::debug!("  Texb: {}", tex.texb);
     log::debug!("  Image count: {}", tex.image_count);
-    log::debug!("  Mipmap count: {}", tex.mipmap_count);
+    log::debug!(
+        "  Mipmap count: {} (actual: {}, missing: {})",
+        tex.mipmap_count,
+        tex.actual_mip_count(),
+        tex.missing_mip_count()
+    );
     log::debug!("  Lz4 compressed: {}", tex.lz4);
     log::debug!("  Texture size: {}", tex.size);
     log::debug!("  w: {} h: {}", tex.dimension[0], tex.dimension[1]);
@@ -227,9 +232,8 @@ fn save_mdl_file(path: &str, bytes: &[u8], output_path: &Path, dry_run: bool) {
 
     log::info!("Puppet model: {}", path);
     log::debug!(
-        "  Records: {}, Quads: {}, Triangles: {}",
+        "  Records: {}, Triangles: {}",
         mdl.data.records.len(),
-        mdl.data.quads.len(),
         mdl.data.triangles.len()
     );
     log::debug!(

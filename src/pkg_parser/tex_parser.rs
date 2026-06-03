@@ -33,15 +33,35 @@ pub struct Tex {
     pub size: u32,
     pub dimension: [u32; 2],
     pub image_count: u32,
+    /// Mipmap chain length advertised by the `.tex` header. `0` for older
+    /// `TEXB0001/0002/0003` headers that don't carry a mip count. This is
+    /// the **advertised** count.
     pub mipmap_count: u32,
+    /// Number of mip levels actually present in the parsed data (level 0 in
+    /// `payload` + every entry in `mip_levels`). Always at least 1.
+    ///
+    /// This is the **actual** count, and it can be lower than
+    /// [`Tex::mipmap_count`] when:
+    /// - the renderer opts out of CPU mip generation via
+    ///   [`Tex::build_mip_chain_with_policy`] with
+    ///   [`MipBuildPolicy::GpuGenerate`], or
+    /// - the on-disk BCn payload is shorter than the header promises (the
+    ///   splitter stops at the last complete level).
+    ///
+    /// Refreshed automatically by `build_mip_chain*`. Right after
+    /// [`Tex::new`] returns it is `1` (only level 0 is in `payload`).
+    /// See also [`Tex::missing_mip_count`] and
+    /// [`Tex::needs_gpu_mip_generation`].
+    pub actual_mip_count: u32,
     pub lz4: bool,
     pub decompressed_size: u32,
     pub extension: String,
     /// Level 0 (full-resolution) payload. For BCn textures this is only
     /// the top-level block data; remaining mip levels are in [`mip_levels`].
     pub payload: Vec<u8>,
-    /// Remaining mip levels (level 1..mipmap_count), each stored as raw bytes.
-    /// Empty if mipmap_count <= 1 or if mips were generated separately.
+    /// Remaining mip levels (level 1..N), each stored as raw bytes.
+    /// Empty if no mip chain was built, if the GPU is expected to generate
+    /// the rest, or if the on-disk payload didn't contain the full chain.
     pub mip_levels: Vec<Vec<u8>>,
 }
 
@@ -139,6 +159,9 @@ impl Tex {
             dimension: [w, h],
             image_count,
             mipmap_count,
+            // Right after parsing only level 0 (in `payload`) is present.
+            // `build_mip_chain_with_policy` will refresh this value.
+            actual_mip_count: 1,
             lz4,
             decompressed_size,
             payload,
@@ -147,25 +170,75 @@ impl Tex {
         })
     }
 
-    /// Build a full mipmap chain from the decoded image data.
+    /// Extract the mip levels that are physically present in the payload.
     ///
-    /// For BCn compressed textures (dxt1/dxt5): splits the concatenated payload
-    /// into individual mip levels, each containing raw block-compressed data.
+    /// The parser does **not** synthesize mips on the CPU — mipmap
+    /// generation is the renderer's job (the GPU is far faster at it). What
+    /// this function does is purely extraction:
     ///
-    /// For uncompressed formats (RGBA after PNG/JPEG decode, or R8/RG88):
-    /// generates mip levels via CPU box-filter downsampling.
+    /// - For BCn compressed textures (`dxt1` / `dxt5`): the engine stores
+    ///   the mip chain concatenated in the payload (`level0 | level1 | ...`)
+    ///   and the splitter slices it into per-level vectors, putting the
+    ///   first slice back into `payload` and the rest into `mip_levels`.
+    ///   If the payload is shorter than [`Tex::mipmap_count`] promises
+    ///   (common in practice — many `.tex` files ship only level 0 and let
+    ///   the runtime generate the rest), the splitter stops at the last
+    ///   complete level and the gap is reported via
+    ///   [`Tex::missing_mip_count`].
+    /// - For every other format (RGBA, R8, RG88, PNG, JPG, MP4, GIF): the
+    ///   on-disk payload only contains level 0, so there is nothing to
+    ///   extract. `mip_levels` stays empty and the renderer is expected
+    ///   to generate the full chain on the GPU at upload time.
     ///
-    /// After calling this, `payload` contains only level 0, and `mip_levels`
-    /// contains levels 1..n in order.
+    /// In both cases this function refreshes [`Tex::actual_mip_count`].
+    /// Calling it multiple times is safe — `mip_levels` is cleared at the
+    /// start so a previous run never leaves stale entries behind.
     pub fn build_mip_chain(&mut self) {
+        // Always start from a clean slate so re-running (or running after
+        // a different payload was reparsed) doesn't leave stale entries.
+        self.mip_levels.clear();
+
         if self.mipmap_count <= 1 {
+            // Either no mips were advertised, or there's only a single level.
+            self.actual_mip_count = 1;
             return;
         }
 
         match self.extension.as_str() {
             "dxt1" | "dxt5" => self.split_bcn_mip_levels(),
-            _ => self.generate_mipmaps_rgba(),
+            // RGBA / R8 / RG88 / PNG / JPG / etc.: no mip data to extract
+            // from the payload. The GPU is expected to generate the chain.
+            _ => {}
         }
+
+        // Refresh the actual level count. `split_bcn_mip_levels` may have
+        // stopped early (payload too short), so we can't just trust
+        // `mipmap_count` here.
+        self.actual_mip_count = (self.mip_levels.len() + 1) as u32;
+    }
+
+    /// Method-style accessor for [`Tex::actual_mip_count`].
+    pub fn actual_mip_count(&self) -> u32 {
+        self.actual_mip_count
+    }
+
+    /// How many mip levels are still missing relative to the header's
+    /// advertised [`Tex::mipmap_count`]. `0` means the full chain is
+    /// present (or that the header didn't advertise any mips in the first
+    /// place).
+    ///
+    /// This is the value the renderer should consult to decide whether to
+    /// enable GPU-side mip generation for the trailing levels (e.g. via
+    /// `wgpu::Features::TEXTURE_FORMAT_*-mipmap-autogen` or by issuing
+    /// `queue.write_texture` for each synthesized level).
+    pub fn missing_mip_count(&self) -> u32 {
+        self.mipmap_count.saturating_sub(self.actual_mip_count)
+    }
+
+    /// `true` when at least one advertised mip level is missing from the
+    /// parsed data and the renderer will need to generate it on the GPU.
+    pub fn needs_gpu_mip_generation(&self) -> bool {
+        self.missing_mip_count() > 0
     }
 
     /// Split BCn payload into individual mip levels.
@@ -212,45 +285,6 @@ impl Tex {
         // Update dimension to level 0 size (may differ from header if header
         // was the full mip-chain size or if some levels were truncated).
         self.dimension = [w as u32, h as u32];
-    }
-
-    /// Generate mipmaps from RGBA pixel data via box-filter downsampling.
-    /// Works for RGBA8 (4 bytes/pixel), R8 (1 byte/pixel), RG88 (2 bytes/pixel).
-    fn generate_mipmaps_rgba(&mut self) {
-        let (w, h) = (self.dimension[0] as usize, self.dimension[1] as usize);
-        let bpp = match self.extension.as_str() {
-            "r8" => 1,
-            "rg88" => 2,
-            _ => 4, // RGBA, PNG, JPEG decoded
-        };
-
-        if self.payload.len() < w * h * bpp {
-            return;
-        }
-
-        let mut prev = &self.payload[..];
-        let mut prev_w = w;
-        let mut prev_h = h;
-
-        for _ in 1..self.mipmap_count {
-            let next_w = (prev_w / 2).max(1);
-            let next_h = (prev_h / 2).max(1);
-
-            if next_w == prev_w && next_h == prev_h {
-                break; // Can't reduce further
-            }
-
-            let mut next = vec![0u8; next_w * next_h * bpp];
-            downsample_box(prev, prev_w, prev_h, bpp, &mut next, next_w, next_h);
-            self.mip_levels.push(next);
-
-            prev = match self.mip_levels.last() {
-                Some(l) => &l[..],
-                None => break,
-            };
-            prev_w = next_w;
-            prev_h = next_h;
-        }
     }
 
     pub fn parse_to_image(&self) -> Option<(Vec<u8>, String)> {
@@ -382,44 +416,4 @@ fn raw_to_png(bytes: Vec<u8>, w: u32, h: u32) -> Option<(Vec<u8>, String)> {
         .write_to(&mut cur, image::ImageFormat::Png)
         .ok()?;
     Some((buf, "png".to_owned()))
-}
-
-/// Box-filter downsampling: average 2×2 pixel blocks into 1 pixel.
-/// `src` has dimensions `sw × sh` with `bpp` bytes per pixel.
-/// `dst` is pre-allocated with size `dw × dh × bpp`.
-fn downsample_box(src: &[u8], sw: usize, sh: usize, bpp: usize, dst: &mut [u8], dw: usize, dh: usize) {
-    let scale_x = sw as f32 / dw as f32;
-    let scale_y = sh as f32 / dh as f32;
-
-    for dy in 0..dh {
-        let src_y0 = (dy as f32 * scale_y) as usize;
-        let src_y1 = ((dy + 1) as f32 * scale_y).ceil() as usize;
-        let src_y1 = src_y1.min(sh);
-
-        for dx in 0..dw {
-            let src_x0 = (dx as f32 * scale_x) as usize;
-            let src_x1 = ((dx + 1) as f32 * scale_x).ceil() as usize;
-            let src_x1 = src_x1.min(sw);
-
-            let dst_off = (dy * dw + dx) * bpp;
-            let mut sum = vec![0u32; bpp];
-            let mut count = 0u32;
-
-            for sy in src_y0..src_y1 {
-                for sx in src_x0..src_x1 {
-                    let src_off = (sy * sw + sx) * bpp;
-                    for c in 0..bpp {
-                        sum[c] += src[src_off + c] as u32;
-                    }
-                    count += 1;
-                }
-            }
-
-            if count > 0 {
-                for c in 0..bpp {
-                    dst[dst_off + c] = (sum[c] / count) as u8;
-                }
-            }
-        }
-    }
 }

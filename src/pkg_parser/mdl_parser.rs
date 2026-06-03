@@ -57,52 +57,52 @@ pub struct MdlvHeader {
     pub header_size: usize,
 }
 
-/// MDLV data section (control points, quads, and render triangles).
+/// MDLV data section (control points and triangle indices).
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MdlvData {
-    pub marker_type: u32,
-    pub record_block_size: u32,
     pub records: Vec<ControlPoint>,
-    /// Quad-derived triangles indexing into control points (vertex IDs < num_records).
-    pub quads: Vec<Triangle>,
-    /// Render triangles derived from tessellating quads (vertex IDs may exceed num_records).
+    /// Triangle indices into control points (3 × u16 per triangle).
     pub triangles: Vec<Triangle>,
 }
 
 /// A single 80-byte control point record.
+///
+/// Layout (all little-endian):
+///   + 0: pos_x  (f32)
+///   + 4: pos_y  (f32)
+///   + 8..+40:   padding / per-vertex data (mostly unused for static
+///               skinning, but reserved for future use)
+///   +40: bone_a (u16) — index of bone A
+///   +44: bone_b (u16) — index of bone B (0xFFFF means unused)
+///   +48..+56:   reserved
+///   +56: weight_a (f32) — skinning weight for bone A
+///   +60: weight_b (f32) — skinning weight for bone B
+///   +64..+72:   reserved
+///   +72: tex_u  (f32)
+///   +76: tex_v  (f32)
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ControlPoint {
     pub index: u32,
-    /// Normalized position X (raw i16 / 32767 → range ≈ [-1, 1])
+    /// Position X (f32; centred around 0, range ≈ [-size/2, +size/2]).
     pub pos_x: f32,
-    /// Normalized position Y (raw i16 / 32767 → range ≈ [-1, 1])
+    /// Position Y (f32; centred around 0).
     pub pos_y: f32,
-    /// Normalized texture U coordinate (raw i16 / 32767 → range ≈ [-1, 1])
+    /// Position Z (always 0 for 2D puppet).
+    pub pos_z: f32,
+    /// Index of bone A (u16 at offset +40). 0xFFFF if unused.
+    pub bone_a: u16,
+    /// Index of bone B (u16 at offset +44). 0xFFFF if unused.
+    pub bone_b: u16,
+    /// Skinning weight for bone A (f32 at offset +56).
+    pub weight_a: f32,
+    /// Skinning weight for bone B (f32 at offset +60).
+    pub weight_b: f32,
+    /// Texture U coordinate (f32; range [0, 1]).
     pub tex_u: f32,
-    /// Normalized texture V coordinate (raw i16 / 32767 → range ≈ [-1, 1])
+    /// Texture V coordinate (f32; range [0, 1]).
     pub tex_v: f32,
-    /// Group identifier (shared by control points of the same mesh part).
-    pub group_id: u32,
-    /// Sub-group index.
-    pub sub_group: u32,
-    /// Sub-sub-group index.
-    pub sub_sub_group: u32,
-    /// Deformation parameter / weight (only ~14 unique values across all points).
-    pub weight: f32,
-    /// Normalized deformation handle A, X component.
-    pub handle_a_x: f32,
-    /// Normalized deformation handle A, Y component.
-    pub handle_a_y: f32,
-    /// Normalized deformation handle B, X component.
-    pub handle_b_x: f32,
-    /// Normalized deformation handle B, Y component.
-    pub handle_b_y: f32,
-    /// Normalized deformation handle C, X component.
-    pub handle_c_x: f32,
-    /// Normalized deformation handle C, Y component.
-    pub handle_c_y: f32,
 }
 
 /// A triangle defined by 3 vertex indices.
@@ -129,7 +129,9 @@ pub struct BoneEntry {
     pub index: u32,
     pub tmp: u8,
     pub bone_type: u32,
-    pub unk1: u32,
+    /// Parent bone index (0xFFFFFFFF means root / no parent).
+    /// Forms the bone hierarchy for character-sheet puppets.
+    pub parent_index: u32,
     pub matrix: [f32; 16],
     pub info: String,
 }
@@ -148,12 +150,12 @@ pub struct Animation {
 }
 
 impl MdlFile {
-    /// Parse an MDL file from raw bytes using direct byte slicing.
+    /// Parse an MDL file from raw bytes using the Almamu reference approach.
     pub fn new(bytes: &[u8]) -> Option<MdlFile> {
-        let mut pos: usize = 0;
-
-        let header = MdlvHeader::parse(bytes, &mut pos)?;
-        let data = MdlvData::parse(bytes, &mut pos, header.header_size)?;
+        let header = MdlvHeader::parse(bytes)?;
+        let data = MdlvData::parse(bytes, &header)?;
+        // Bones parse starts from MDLS position; we find it from bytes.
+        let mut pos = bytes.windows(4).position(|w| w == b"MDLS")?;
         let bones = Bones::parse(bytes, &mut pos)?;
         let animation = Animation::parse(bytes, &mut pos)?;
 
@@ -177,218 +179,240 @@ impl MdlFile {
 }
 
 impl MdlvHeader {
-    fn parse(bytes: &[u8], pos: &mut usize) -> Option<MdlvHeader> {
-        // Magic: MDLV0023 (8 bytes)
-        let magic = bytes.get(*pos..*pos + 8)?;
-        if magic != b"MDLV0023" {
+    fn parse(bytes: &[u8]) -> Option<MdlvHeader> {
+        let mut pos: usize = 0;
+
+        // Magic: MDLV0021 or MDLV0023 (8 bytes)
+        let magic = bytes.get(pos..pos + 8)?;
+        let magic_str = String::from_utf8_lossy(magic).into_owned();
+        if magic_str != "MDLV0021" && magic_str != "MDLV0023" {
             return None;
         }
-        *pos += 8;
+        pos += 8;
 
-        let type_val = read_u32_le(bytes, pos)?;
-        let sub_version = read_u16_le(bytes, pos)?;
-        let flags = read_u16_le(bytes, pos)?;
-        let unknown_16 = read_u32_le(bytes, pos)?;
+        // Padding byte
+        pos += 1;
 
-        // Padding byte at offset 20
-        *pos += 1;
+        let type_val = read_u32_le(bytes, &mut pos)?;
+        let sub_version = read_u16_le(bytes, &mut pos)?;
+        let flags = read_u16_le(bytes, &mut pos)?;
+        let unknown_16 = read_u32_le(bytes, &mut pos)?;
 
-        // Material path
-        let material_path = read_cstring(bytes, pos)?;
-
-        let header_size = bytes[*pos..]
-            .windows(4)
-            .position(|w| w == [0x00, 0x0f, 0x00, 0x80])
-            .map(|p| *pos + p)
-            .unwrap_or(bytes.len());
+        // Material path begins immediately after unknown_16 (at offset 21).
+        // There is no separate padding byte — the previous parser dropped the
+        // leading 'm' from "materials/..." by reading the cstring at offset 22.
+        let material_path = read_cstring(bytes, &mut pos)?;
 
         Some(MdlvHeader {
-            magic: "MDLV0023".to_string(),
+            magic: magic_str,
             type_val,
             sub_version,
             flags,
             unknown_16,
             material_path,
-            header_size,
+            header_size: 0, // unused; kept for backward compat
         })
     }
+}
+
+/// Locating the puppet mesh block.
+///
+/// The mesh block sits at a fully predictable offset from the start of the
+/// file once the header is known:
+///
+///   mesh_offset = 21  (cstring start)
+///               + 1   (null terminator)
+///               + material_path.len()  (UTF-8 byte length)
+///               + 28  (zero padding observed in every normal MDL)
+///
+/// This sum equals `50 + material_path.len()`. The first 4 bytes of the mesh
+/// block are the constant signature `0F 00 80 01`; we verify it as a sanity
+/// check and fall back to a byte-level scan only if it doesn't match (e.g.
+/// for malformed or skeletonless files that don't follow the standard layout).
+const MESH_BLOCK_SIGNATURE: [u8; 4] = [0x0F, 0x00, 0x80, 0x01];
+const HEADER_TO_CSTRING_START: usize = 21;
+const MESH_PADDING_AFTER_CSTRING: usize = 28;
+const MESH_HEADER_SIZE: usize = 8;
+const VERTEX_STRIDE: usize = 80;
+
+fn predict_mesh_offset(material_path_len: usize) -> usize {
+    HEADER_TO_CSTRING_START + 1 + material_path_len + MESH_PADDING_AFTER_CSTRING
+}
+
+/// Find the puppet mesh block at the predicted offset. Returns the block's
+/// `(offset, vertex_bytes, index_bytes)` if the layout is the standard one.
+///
+/// If the predicted offset doesn't have the expected signature, falls back
+/// to a byte-level structural scan to handle unusual files.
+fn locate_mesh_block(
+    bytes: &[u8],
+    mdls_offset: usize,
+    material_path_len: usize,
+) -> Option<(usize, u32, u32)> {
+    let search_end = mdls_offset.min(bytes.len());
+    let predicted = predict_mesh_offset(material_path_len);
+
+    if let Some(found) = try_read_mesh_block(bytes, predicted, search_end) {
+        return Some((predicted, found.0, found.1));
+    }
+
+    // Fallback: byte-level structural scan (kept for malformed/unusual files).
+    find_mesh_block_scan(bytes, mdls_offset)
+}
+
+fn try_read_mesh_block(
+    bytes: &[u8],
+    block_offset: usize,
+    search_end: usize,
+) -> Option<(u32, u32)> {
+    if block_offset + MESH_HEADER_SIZE > search_end {
+        return None;
+    }
+    if &bytes[block_offset..block_offset + 4] != &MESH_BLOCK_SIGNATURE {
+        return None;
+    }
+    let vertex_bytes = u32::from_le_bytes([
+        bytes[block_offset + 4],
+        bytes[block_offset + 5],
+        bytes[block_offset + 6],
+        bytes[block_offset + 7],
+    ]);
+    if vertex_bytes == 0 || vertex_bytes as usize % VERTEX_STRIDE != 0 {
+        return None;
+    }
+    let vbytes = vertex_bytes as usize;
+    if vbytes > bytes.len() {
+        return None;
+    }
+    let vertices_end = block_offset + MESH_HEADER_SIZE + vbytes;
+    if vertices_end + 4 > search_end {
+        return None;
+    }
+    let index_bytes = u32::from_le_bytes([
+        bytes[vertices_end],
+        bytes[vertices_end + 1],
+        bytes[vertices_end + 2],
+        bytes[vertices_end + 3],
+    ]);
+    if index_bytes == 0 || index_bytes as usize % 6 != 0 {
+        return None;
+    }
+    let indices_end = vertices_end + 4 + index_bytes as usize;
+    if indices_end > search_end {
+        return None;
+    }
+    Some((vertex_bytes, index_bytes))
+}
+
+/// Byte-level structural scan, used as a fallback when the predicted offset
+/// doesn't match the expected signature. Scans from after the magic+pad to
+/// the MDLS section, looking for a block where:
+///   - offset+4 contains vertexBytes (multiple of 80)
+///   - offset+8+vertexBytes contains indexBytes (multiple of 6)
+///   - everything fits before MDLS
+fn find_mesh_block_scan(bytes: &[u8], mdls_offset: usize) -> Option<(usize, u32, u32)> {
+    const MARKER_SIZE: usize = 9;
+    let search_end = mdls_offset.min(bytes.len());
+    let mut offset = MARKER_SIZE;
+
+    while offset + MESH_HEADER_SIZE + 4 <= search_end {
+        let vertex_bytes = u32::from_le_bytes([
+            bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7],
+        ]);
+
+        if vertex_bytes == 0 || vertex_bytes as usize % VERTEX_STRIDE != 0 {
+            offset += 1;
+            continue;
+        }
+
+        let vbytes = vertex_bytes as usize;
+        if vbytes > bytes.len() {
+            offset += 1;
+            continue;
+        }
+
+        let vertices_end = offset + MESH_HEADER_SIZE + vbytes;
+        if vertices_end + 4 > search_end {
+            offset += 1;
+            continue;
+        }
+
+        let index_bytes = u32::from_le_bytes([
+            bytes[vertices_end], bytes[vertices_end + 1],
+            bytes[vertices_end + 2], bytes[vertices_end + 3],
+        ]);
+
+        if index_bytes == 0 || index_bytes as usize % 6 != 0 {
+            offset += 1;
+            continue;
+        }
+
+        let indices_end = vertices_end + 4 + index_bytes as usize;
+        if indices_end > search_end {
+            offset += 1;
+            continue;
+        }
+
+        return Some((offset, vertex_bytes, index_bytes));
+    }
+
+    None
 }
 
 impl MdlvData {
-    fn parse(bytes: &[u8], pos: &mut usize, data_start: usize) -> Option<MdlvData> {
-        // Guard against bogus data_start (must not exceed the buffer)
-        if data_start + 8 > bytes.len() {
-            return None;
-        }
+    fn parse(bytes: &[u8], header: &MdlvHeader) -> Option<MdlvData> {
+        // Find MDLS marker
+        let mdls_offset = bytes.windows(4).position(|w| w == b"MDLS")?;
 
-        *pos = data_start;
+        // Locate the mesh block at the predicted offset (or fall back to scan)
+        let (block_offset, vertex_bytes, index_bytes) =
+            locate_mesh_block(bytes, mdls_offset, header.material_path.len())?;
 
-        // Marker: 0x80000F00 (4 bytes)
-        let marker_type = read_u32_le(bytes, pos)?;
-        if marker_type != 0x80000F00 {
-            return None;
-        }
+        let vertices_offset = block_offset + MESH_HEADER_SIZE;
+        let indices_offset = vertices_offset + vertex_bytes as usize + 4; // +4 for indexBytes field
 
-        // Skip type byte
-        *pos += 1;
+        let num_records = vertex_bytes as usize / VERTEX_STRIDE;
+        let num_indices = index_bytes as usize / 2; // u16
 
-        // 3-byte record block size
-        let b = bytes.get(*pos..*pos + 3)?;
-        *pos += 3;
-        let record_block_size = u32::from_le_bytes([b[0], b[1], b[2], 0]);
-
-        // Parse control point records (each 80 bytes)
-        let record_start = data_start + 8;
-        let record_size = 80usize;
-        let num_records = record_block_size as usize / record_size;
-
-        // Sanity checks to avoid overflow / huge allocations on malformed data
-        let Some(record_end) = record_start.checked_add(record_block_size as usize) else {
-            return None;
-        };
-        if record_end > bytes.len() || num_records > bytes.len() / record_size {
-            return None;
-        }
-
+        // Parse control points (see ControlPoint doc for layout).
         let mut records = Vec::with_capacity(num_records);
         for i in 0..num_records {
-            let off = record_start + i * record_size;
-            if off + record_size > bytes.len() {
+            let off = vertices_offset + i * VERTEX_STRIDE;
+            if off + 80 > bytes.len() {
                 break;
             }
-            records.push(ControlPoint::parse(bytes, off, i as u32));
-        }
-
-        // Parse remaining data (between records and MDLS) as triangles.
-        // Use .get() to avoid panicking if record_end is out of bounds.
-        let mdls_pos = bytes
-            .get(record_end..)
-            .and_then(|tail| {
-                tail.windows(4)
-                    .position(|w| w == b"MDLS")
-                    .map(|p| record_end + p)
-            })
-            .unwrap_or(bytes.len());
-        let (quads, triangles) = Self::parse_triangles_from_gap(bytes, record_end, mdls_pos);
-
-        *pos = mdls_pos;
-
-        Some(MdlvData {
-            marker_type,
-            record_block_size,
-            records,
-            quads,
-            triangles,
-        })
-    }
-
-    /// Parse the data between records_end and MDLS into two sections.
-    ///
-    /// The gap starts with a 5-byte header:
-    ///   byte[0]      — section type (0x3e or 0x3f)
-    ///   bytes[1..5]  — u32 LE: size in bytes of the quads triangle data
-    ///
-    /// After the quads data, the remaining bytes are the render triangles
-    /// section (derived from tessellating the quads; vertex indices may far
-    /// exceed the control point count).
-    fn parse_triangles_from_gap(
-        bytes: &[u8], start: usize, mdls_pos: usize,
-    ) -> (Vec<Triangle>, Vec<Triangle>) {
-        let mut quads = Vec::new();
-        let mut triangles = Vec::new();
-
-        let mdls_pos = mdls_pos.min(bytes.len());
-        if mdls_pos < start + 5 + 6 {
-            return (quads, triangles);
-        }
-
-        // Read 5-byte section header
-        let header = &bytes[start..start + 5];
-        let quads_data_size = u32::from_le_bytes([header[1], header[2], header[3], header[4]]) as usize;
-
-        let data_start = start + 5;
-        let gap_end = mdls_pos;
-
-        // Clamp quads_data_size to available data
-        let quads_end = data_start.saturating_add(quads_data_size).min(gap_end);
-
-        // Parse quads section
-        let mut off = data_start;
-        while off + 6 <= quads_end {
-            let Some(chunk) = bytes.get(off..off + 6) else {
-                break;
-            };
-            quads.push(Triangle {
-                a: u16::from_le_bytes([chunk[0], chunk[1]]),
-                b: u16::from_le_bytes([chunk[2], chunk[3]]),
-                c: u16::from_le_bytes([chunk[4], chunk[5]]),
+            let pos_x = f32::from_le_bytes([bytes[off], bytes[off+1], bytes[off+2], bytes[off+3]]);
+            let pos_y = f32::from_le_bytes([bytes[off+4], bytes[off+5], bytes[off+6], bytes[off+7]]);
+            let pos_z = f32::from_le_bytes([bytes[off+8], bytes[off+9], bytes[off+10], bytes[off+11]]);
+            let bone_a = u16::from_le_bytes([bytes[off+40], bytes[off+41]]);
+            let bone_b = u16::from_le_bytes([bytes[off+44], bytes[off+45]]);
+            let weight_a = f32::from_le_bytes([bytes[off+56], bytes[off+57], bytes[off+58], bytes[off+59]]);
+            let weight_b = f32::from_le_bytes([bytes[off+60], bytes[off+61], bytes[off+62], bytes[off+63]]);
+            let tex_u = f32::from_le_bytes([bytes[off+72], bytes[off+73], bytes[off+74], bytes[off+75]]);
+            let tex_v = f32::from_le_bytes([bytes[off+76], bytes[off+77], bytes[off+78], bytes[off+79]]);
+            records.push(ControlPoint {
+                index: i as u32,
+                pos_x, pos_y, pos_z,
+                bone_a, bone_b,
+                weight_a, weight_b,
+                tex_u, tex_v,
             });
+        }
+
+        // Parse triangle indices (u16, 3 per triangle)
+        let mut triangles = Vec::with_capacity(num_indices / 3);
+        let mut off = indices_offset;
+        while off + 6 <= indices_offset + index_bytes as usize {
+            let a = u16::from_le_bytes([bytes[off], bytes[off+1]]);
+            let b = u16::from_le_bytes([bytes[off+2], bytes[off+3]]);
+            let c = u16::from_le_bytes([bytes[off+4], bytes[off+5]]);
+            if (a as usize) < num_records && (b as usize) < num_records && (c as usize) < num_records {
+                triangles.push(Triangle { a, b, c });
+            }
             off += 6;
         }
 
-        // Parse render triangles section (remainder of gap)
-        off = quads_end;
-        while off + 6 <= gap_end {
-            let Some(chunk) = bytes.get(off..off + 6) else {
-                break;
-            };
-            triangles.push(Triangle {
-                a: u16::from_le_bytes([chunk[0], chunk[1]]),
-                b: u16::from_le_bytes([chunk[2], chunk[3]]),
-                c: u16::from_le_bytes([chunk[4], chunk[5]]),
-            });
-            off += 6;
-        }
-
-        (quads, triangles)
-    }
-}
-
-impl ControlPoint {
-    fn parse(bytes: &[u8], offset: usize, index: u32) -> ControlPoint {
-        let pos_x = i16::from_le_bytes([bytes[offset], bytes[offset + 1]]);
-        let pos_y = i16::from_le_bytes([bytes[offset + 2], bytes[offset + 3]]);
-        let tex_u = i16::from_le_bytes([bytes[offset + 4], bytes[offset + 5]]);
-        let tex_v = i16::from_le_bytes([bytes[offset + 6], bytes[offset + 7]]);
-        let group_id = u32::from_le_bytes([bytes[offset + 8], bytes[offset + 9], bytes[offset + 10], bytes[offset + 11]]);
-        // bytes 12–27: padding / markers (always 0 or constant 0x80000000)
-        let handle_a_x = i16::from_le_bytes([bytes[offset + 28], bytes[offset + 29]]);
-        let handle_a_y = i16::from_le_bytes([bytes[offset + 30], bytes[offset + 31]]);
-        let sub_group = u32::from_le_bytes([bytes[offset + 32], bytes[offset + 33], bytes[offset + 34], bytes[offset + 35]]);
-        // bytes 36–39: marker (always 0x80000000)
-        let weight = i16::from_le_bytes([bytes[offset + 40], bytes[offset + 41]]);
-        // bytes 42–55: padding (always 0)
-        // bytes 56–59: marker (always 0x80000000)
-        // bytes 60–63: constant marker (always 0x3f000000 = 63)
-        let sub_sub_group = u32::from_le_bytes([bytes[offset + 64], bytes[offset + 65], bytes[offset + 66], bytes[offset + 67]]);
-        // bytes 68–71: padding (always 0)
-        let handle_b_x = i16::from_le_bytes([bytes[offset + 72], bytes[offset + 73]]);
-        let handle_b_y = i16::from_le_bytes([bytes[offset + 74], bytes[offset + 75]]);
-        let handle_c_x = i16::from_le_bytes([bytes[offset + 76], bytes[offset + 77]]);
-        let handle_c_y = i16::from_le_bytes([bytes[offset + 78], bytes[offset + 79]]);
-
-        // Normalize i16 coords to f32 range ≈ [-1, 1]
-        const NORM: f32 = 32767.0;
-        let pos_x = pos_x as f32 / NORM;
-        let pos_y = pos_y as f32 / NORM;
-        let tex_u = tex_u as f32 / NORM;
-        let tex_v = tex_v as f32 / NORM;
-        let handle_a_x = handle_a_x as f32 / NORM;
-        let handle_a_y = handle_a_y as f32 / NORM;
-        let handle_b_x = handle_b_x as f32 / NORM;
-        let handle_b_y = handle_b_y as f32 / NORM;
-        let handle_c_x = handle_c_x as f32 / NORM;
-        let handle_c_y = handle_c_y as f32 / NORM;
-        // weight is a small positive parameter, normalize to [0, ~0.1]
-        let weight = weight as f32 / NORM;
-
-        ControlPoint {
-            index, pos_x, pos_y, tex_u, tex_v,
-            group_id, sub_group, sub_sub_group,
-            weight, handle_a_x, handle_a_y,
-            handle_b_x, handle_b_y,
-            handle_c_x, handle_c_y,
-        }
+        Some(MdlvData { records, triangles })
     }
 }
 
@@ -423,7 +447,7 @@ impl Bones {
                 index: i,
                 tmp,
                 bone_type,
-                unk1,
+                parent_index: unk1,
                 matrix,
                 info,
             });
