@@ -99,110 +99,216 @@ Raw file contents concatenated sequentially. Each file's data is located by seek
 | `0x5B` | `u8[]` | var | Pixel data (decompress with LZ4 if flag set) |
 
 ---
-
 # `.mdl` Puppet Model Format
 
-The `.mdl` file defines a deformable 2D mesh used for puppet warp animation (Live2D-style). It contains control points, triangle topology, a skeleton, and animation keyframes.
+The `.mdl` file defines a deformable 2D mesh used for puppet warp animation
+(Live2D-style). An MDL is a **chain of null-terminated sections**; only the
+first two are mandatory:
 
 ```
-+------------------+
-|  MDLV Section    |  ← Mesh: control points + triangles
-+------------------+
-|  MDLS Section    |  ← Skeleton: bones + matrices
-+------------------+
-|  MDLA Section    |  ← Animation: keyframes
-+------------------+
++--------------------------------------+
+| MDLV0021/MDLV0023  header + mesh     |  control points, triangles,
+|                        (+ trailer)   |  index batches
++--------------------------------------+
+| MDLS0004  skeleton                   |  bones, bind matrices, metadata
++--------------------------------------+
+| MDAT0001  attachments (optional)     |  named sockets parented to bones
++--------------------------------------+
+| MDLA0006  animation (optional)       |  clips -> per-bone tracks
++--------------------------------------+
+| MDLE0002  bone matrices (optional)   |  one 4x4 matrix per bone
++--------------------------------------+
+| 0x00      end-of-file sentinel       |
++--------------------------------------+
 ```
 
-## 1. MDLV Section Header
+Each section starts with an 8-byte magic + `\0`. `MDLS`/`MDAT` carry a `u32`
+absolute offset to the next section, `MDLA`/`MDLE` carry the absolute offset
+where *they* end (which is where the next section starts). Sections may be
+missing (models without a skeleton or without animation exist), so the walk
+only ever continues at offsets the format itself provides — an unknown magic
+ends the walk, it is never searched for.
+
+## 1. MDLV Section (header + mesh)
 
 | Offset | Size | Type | Description |
 |--------|------|------|-------------|
-| `0x00` | 8 | `char[8]` | Magic: `MDLV0023` |
-| `0x08` | 4 | `u32` | Type/flags: `0x80000900` |
-| `0x0C` | 2 | `u16` | Sub-version: `0x0101` |
-| `0x0E` | 2 | `u16` | Flags: `0x0000` |
-| `0x10` | 4 | `u32` | Unknown (typically `256`) |
-| `0x14` | 1 | `u8` | Padding |
-| `0x15` | var | `char[]` | Material path (null-terminated) |
-| var | — | — | Zero-padding to alignment |
-| var | 4 | `u32` | Marker: `0x80000F00` |
-| +4 | 1 | `u8` | Type byte: `0x01` |
-| +5 | 3 | `u24` | Control point block size (bytes) |
+| `0x00` | 8 | `char[8]` | Magic: `MDLV0021` / `MDLV0023` |
+| `0x08` | 1 | `u8` | Reserved (0) |
+| `0x09` | 4 | `u32` | Type word `0x01800009` (same family as the mesh tag `0x0180000F`) |
+| `0x0D` | 2 | `u16` | Sub-version (1 observed) |
+| `0x0F` | 2 | `u16` | Flags (0 observed) |
+| `0x11` | 4 | `u32` | Unknown (0 observed) |
+| `0x15` | var | `char[]` | Material path, null-terminated |
+| … | 28 | — | Zero padding (constant) |
 
-## Control Point Records
+> The same bytes can be read as `u32@0x08 = 0x80000900`, `u16@0x0C = 0x0101`,
+> `u16 = 0`, `u32@0x10 = 256`, `u8` pad — both readings end at offset 21.
+> The layout above is kept because the type word then matches the mesh tag.
 
-An array of **80-byte records** follows the marker. Each record defines a vertex of the puppet deformation mesh.
-
-| Offset | Size | Type | Description |
-|--------|------|------|-------------|
-| `+0x00` | 2 | `i16` | X position (pixel-space) |
-| `+0x02` | 2 | `i16` | Y position (pixel-space) |
-| `+0x04` | 2 | `i16` | U texture coordinate |
-| `+0x06` | 2 | `i16` | V texture coordinate |
-| `+0x08` | 4 | `u32` | **Group ID** — major part (63–68, 191–196) |
-| `+0x0C` | 4 | `u32` | Unknown |
-| `+0x10` | 4 | `u32` | Unknown |
-| `+0x14` | 4 | `u32` | Constant `0x80000000` |
-| `+0x18` | 4 | `u32` | Constant `0x8000003F` |
-| `+0x1C` | 4 | `f32` | Float (varies) |
-| `+0x20` | 4 | `u32` | **Sub-group ID** (49–55, 175–183) |
-| `+0x24` | 4 | `u32` | Constant `0x80000000` |
-| `+0x28` | 4 | `u32` | Constant `319` (render layer?) |
-| `+0x2C` | 12 | `u8[12]` | Zero padding |
-| `+0x38` | 4 | `f32` | Float (27 unique values) |
-| `+0x3C` | 4 | `u32` | Flag (`0x0000003F` or `0x80000000`) |
-| `+0x40` | 4 | `u32` | **Sub-sub-group ID** (0, 55–63) |
-| `+0x44` | 4 | `u32` | Unknown |
-| `+0x48` | 4 | `u32` | Raw (varies) |
-| `+0x4C` | 4 | `f32` | Float (varies) |
-
-The three group IDs form a **3-level hierarchy** for skeletal deformation.
-
-## Triangle Index Data
-
-After the control points comes a section with a **5-byte header** followed by triangle indices. Each triangle is `3 × u16` (6 bytes).
+### Mesh block
 
 ```
-[5-byte header] → [a, b, c] × N triangles
+u32  tag = 0x0180000F   ("0F 00 80 01")
+u32  vertex_bytes       (multiple of 80)
+     control points     (vertex_bytes / 80 records of 80 bytes)
+u32  index_bytes        (multiple of 6)
+     triangle indices   (u16, 3 per triangle)
 ```
 
-## 2. MDLS Section (Skeleton)
+The block starts at `21 + len(material_path) + 1 + 28`. That offset is
+derived from the header, never searched for: the tag must be there, and if
+it isn't the parse fails (`None`) instead of accepting something that merely
+looks like a mesh.
+
+### Control point (80 bytes, little-endian)
+
+| Off | Type | Description |
+|-----|------|-------------|
+| 0 | f32 | `pos_x` (object-local, centred on 0) |
+| 4 | f32 | `pos_y` |
+| 8 | f32 | `pos_z` (0 for 2D puppets) |
+| 12..36 | — | reserved (constants `0.0` / `1.0`) |
+| 28 | f32 | per-vertex varied value (unique per vertex) |
+| 36 | f32 | `1.0` |
+| 40 | u32 ×4 | **bone indices**, one per skinning slot |
+| 56 | f32 ×4 | **skinning weights** — always sum to `1.0` |
+| 72 | f32 | `tex_u` (0..1) |
+| 76 | f32 | `tex_v` (0..1) |
+
+A vertex uses up to 4 bones; unused slots simply carry weight `0.0`.
+
+### Mesh trailer (between the index list and the next section)
 
 ```
-MDLS0004\0  [u32 next_offset]  [u32 bone_count]  [BONEENTRY × bone_count]
+u8                extra block count (0 or 1 observed)
+  per block: u32  type (1), u32 byte length, payload
+             payload = 12 bytes/vertex (xyz) when it matches the vertex count
+u8                table tag (1)
+u32               table bytes (multiple of 16)
+  per entry: u32  group id, u32 reserved, u32 start, u32 count
+u32               reserved (0)
 ```
 
-Each bone entry:
+The table splits the index list into draw batches; the `start`/`count` pairs
+partition it contiguously. The 12-byte blocks hold the same vertices in a
+different origin (a constant offset from the primary positions).
 
-| Offset | Size | Type | Description |
-|--------|------|------|-------------|
-| `+0x00` | 1 | `u8` | tmp |
-| `+0x01` | 4 | `u32` | Bone type (typically `1`) |
-| `+0x05` | 4 | `u32` | Unknown |
-| `+0x09` | 4 | `u32` | Entry byte length (typically `64`) |
-| `+0x0D` | 64 | `f32[16]` | 4×4 bone matrix |
-| `+0x4D` | var | `char[]` | JSON metadata (null-terminated) |
+## 2. MDLS Section (skeleton)
 
-Bone metadata example:
+```
+"MDLS0004" \0
+u32   next section offset
+u32   bone count
+u8    reserved (0)
+BONE × bone_count
+[undecoded trailing bytes up to `next`]
+```
+
+Each bone:
+
+| Size | Type | Description |
+|------|------|-------------|
+| 4 | `u32` | Bone type (0 = root-ish, 1 = regular observed) |
+| 4 | `u32` | Parent index (`0xFFFFFFFF` = no parent) |
+| 4 | `u32` | Payload byte length (64 = a 4×4 matrix) |
+| 64 | `f32[16]` | Bind-pose 4×4 matrix, **row-major, translation in row 3** |
+| var | `char[]` | Info JSON (`tp` = pin position, `tm` = multiplier) |
+| var | `char[]` | Bone name (often empty, e.g. `"legs"`) |
+
+Example info string:
 ```json
-{"a":null,"tp":"36.16162 726.83881 0.00000","tm":100.0}
+{"a":null,"lamax":null,"lamin":null,"rax":null,"ray":null,"raz":null,
+ "s":null,"tm":100.0,"tp":"408.81891 0.00000 0.00000"}
 ```
 
-The `tp` field defines the **bone pin position** `(x, y, z)` on the texture.
-
-## 3. MDLA Section (Animation)
+## 3. MDAT Section (attachments, optional)
 
 ```
-MDLA0006\0  [u32 end_offset]  [u32 anim_count]  [u32 frame_count]  [u32 pad]
-[str name\0]  [str loop\0]  [keyframe_data]
+"MDAT0001" \0
+u32   next section offset
+u16   attachment count
+per attachment:
+  u16       bone index the socket is parented to
+  char[]    name (e.g. "head", "hair back")
+  f32[16]   4×4 row-major transform (translation in row 3)
 ```
 
-| Field | Description |
-|-------|-------------|
-| `end_offset` | Absolute offset to animation data end |
-| `anim_count` | Typically `1` |
-| `frame_count` | Number of keyframes (215–812 observed) |
-| `name` | Animation name |
-| `loop` | Loop mode (e.g. `"loop"`) |
-| `keyframe_data` | Raw animation data (format TBD) |
+## 4. MDLA Section (animation, optional)
+
+```
+"MDLA0006" \0
+u32   section end offset (absolute; start of the next section)
+u32   animation count
+u32   unknown section count (215..3330 observed; NOT the timeline length)
+u32   reserved (0)
+per clip:
+  char[]    clip name ("Animation 1", "eyes", "动画 1", …)
+  char[]    loop mode ("loop")
+  f32       fps (7.5 .. 60 observed)
+  u32       frame count (timeline length)
+  u32       reserved (0)
+  u32       track count (== bone count)
+  per track (clips after the first are separated by zero padding and a small
+             unknown prefix):
+    u32     reserved (0)
+    u32     keyframe bytes (= 36 * (frame_count + 1))
+    KEYFRAME × (frame_count + 1)
+```
+
+Each keyframe is 36 bytes = 9 little-endian floats:
+
+```
+tx, ty, tz,   // translation
+rx, ry, rz,   // rotation (radians; rz is the visible 2D rotation)
+sx, sy, sz    // scale (always 1,1,1 observed)
+```
+
+Keyframes are **dense**: every track stores a sample for every frame, so
+playback is a direct index (`frame = floor(t * fps)`), no interpolation of
+stored keys is required. Frame 0 reproduces the bone's bind pose exactly —
+`rz` matches the rotation of the MDLS/MDLE matrix.
+
+There is one track per bone, in bone order. A file may contain several clips
+(e.g. `asuna_body` has `eyes` + `Animation 2`).
+
+## 5. MDLE Section (bone matrices, optional)
+
+```
+"MDLE0002" \0
+u32   section end offset (absolute)
+u32   payload byte length (multiple of 64)
+f32[16] × (length / 64)   // one 4×4 matrix per bone, row-major
+```
+
+Present only in some files; the matrix count matches the bone count.
+
+## 6. End-of-file sentinel
+
+Every file ends with a single `0x00` byte — an empty section name that
+terminates the chain. `MDLA`/`MDLE` end offsets point at it when no further
+section follows.
+
+## Parsing
+
+### `MdlFile::new(bytes: &[u8]) -> Option<MdlFile>`
+
+Strict: returns `None` when the bytes are not an MDL (bad magic), when the
+mesh block doesn't sit exactly where the header says, or when a section that
+*is* present doesn't match the documented layout. Sections that are simply
+absent are skipped (empty default), and a truncated buffer never panics.
+
+```rust
+pub struct MdlFile {
+    pub header: MdlvHeader,       // MDLV header (magic, material path, …)
+    pub data: MdlvData,           // control points, triangles, batches
+    pub bones: Bones,             // MDLS skeleton (+ undecoded trailing)
+    pub attachments: Attachments, // MDAT sockets
+    pub animation: Animation,     // MDLA clips/tracks/keyframes
+    pub bone_matrices: BoneMatrices, // MDLE matrices
+}
+```
+
+### `MdlFile::to_json()` / `to_json_compact()`
+
+Serializes the whole model (used by `Pkg::save_pkg` for `*.mdl.json`).
