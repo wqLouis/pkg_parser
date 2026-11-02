@@ -57,10 +57,10 @@ fn collect_loose_files(dir: &Path, out: &mut Vec<(String, Vec<u8>)>) {
         let path = entry.path();
         if path.is_dir() {
             collect_loose_files(&path, out);
-        } else if path.extension().and_then(|e| e.to_str()) == Some("mdl") {
-            if let Ok(bytes) = std::fs::read(&path) {
-                out.push((path.display().to_string(), bytes));
-            }
+        } else if path.extension().and_then(|e| e.to_str()) == Some("mdl")
+            && let Ok(bytes) = std::fs::read(&path)
+        {
+            out.push((path.display().to_string(), bytes));
         }
     }
 }

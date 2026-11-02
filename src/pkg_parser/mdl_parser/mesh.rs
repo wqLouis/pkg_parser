@@ -233,7 +233,7 @@ fn parse_mesh_trailer(
         return None;
     }
     let table_bytes = read_u32(bytes, &mut pos)? as usize;
-    if table_bytes % 16 != 0 {
+    if !table_bytes.is_multiple_of(16) {
         return None;
     }
     bytes.get(pos..pos + table_bytes + 4)?; // table + trailing reserved u32
@@ -258,18 +258,18 @@ fn parse_mesh_trailer(
 /// byte count that is a multiple of 6, all inside the buffer.
 fn read_mesh_block(bytes: &[u8], block_offset: usize) -> Option<(u32, u32)> {
     let header = bytes.get(block_offset..block_offset + MESH_HEADER_SIZE)?;
-    if &header[..4] != &MESH_BLOCK_SIGNATURE {
+    if header[..4] != MESH_BLOCK_SIGNATURE {
         return None;
     }
     let vertex_bytes = u32::from_le_bytes(header[4..8].try_into().ok()?);
-    if vertex_bytes == 0 || vertex_bytes as usize % VERTEX_STRIDE != 0 {
+    if vertex_bytes == 0 || !(vertex_bytes as usize).is_multiple_of(VERTEX_STRIDE) {
         return None;
     }
 
     let vertices_end = block_offset + MESH_HEADER_SIZE + vertex_bytes as usize;
     let index_len = bytes.get(vertices_end..vertices_end + 4)?;
     let index_bytes = u32::from_le_bytes(index_len.try_into().ok()?);
-    if index_bytes == 0 || index_bytes as usize % 6 != 0 {
+    if index_bytes == 0 || !(index_bytes as usize).is_multiple_of(6) {
         return None;
     }
 

@@ -32,7 +32,7 @@ impl BoneMatrices {
 
         let end_offset = read_u32(bytes, &mut pos)?;
         let data_len = read_u32(bytes, &mut pos)? as usize;
-        if data_len % 64 != 0 || pos + data_len > bytes.len() {
+        if !data_len.is_multiple_of(64) || pos + data_len > bytes.len() {
             return None;
         }
 

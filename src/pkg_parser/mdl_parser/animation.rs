@@ -176,16 +176,17 @@ fn parse_clip(bytes: &[u8], pos: &mut usize, limit: usize) -> Option<AnimationCl
         }
         let mut keyframes = Vec::with_capacity(keyframe_bytes / KEYFRAME_BYTES);
         for _ in 0..keyframe_bytes / KEYFRAME_BYTES {
-            let mut k = Keyframe::default();
-            k.tx = read_f32(bytes, &mut p)?;
-            k.ty = read_f32(bytes, &mut p)?;
-            k.tz = read_f32(bytes, &mut p)?;
-            k.rx = read_f32(bytes, &mut p)?;
-            k.ry = read_f32(bytes, &mut p)?;
-            k.rz = read_f32(bytes, &mut p)?;
-            k.sx = read_f32(bytes, &mut p)?;
-            k.sy = read_f32(bytes, &mut p)?;
-            k.sz = read_f32(bytes, &mut p)?;
+            let k = Keyframe {
+                tx: read_f32(bytes, &mut p)?,
+                ty: read_f32(bytes, &mut p)?,
+                tz: read_f32(bytes, &mut p)?,
+                rx: read_f32(bytes, &mut p)?,
+                ry: read_f32(bytes, &mut p)?,
+                rz: read_f32(bytes, &mut p)?,
+                sx: read_f32(bytes, &mut p)?,
+                sy: read_f32(bytes, &mut p)?,
+                sz: read_f32(bytes, &mut p)?,
+            };
             keyframes.push(k);
         }
         tracks.push(Track { keyframes });

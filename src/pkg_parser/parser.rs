@@ -24,7 +24,7 @@ pub struct Header {
     pub file_count: u32,
 }
 
-pub(self) struct Entry {
+struct Entry {
     pub path: String,
     pub offset: u32,
     pub size: u32,
