@@ -26,6 +26,7 @@ fn test_rgba_mip_chain_left_to_gpu() {
         texb: "TEXB0004".into(),
         size: payload.len() as u32,
         dimension: [w, h],
+        real_dimension: [w, h],
         image_count: 1,
         mipmap_count: 3, // 4x4 → 2x2 → 1x1
         actual_mip_count: 1,
@@ -59,6 +60,7 @@ fn test_no_mipmap_when_count_is_one() {
         texb: "TEXB0004".into(),
         size: 16,
         dimension: [2, 2],
+        real_dimension: [2, 2],
         image_count: 1,
         mipmap_count: 1,
         actual_mip_count: 1,
@@ -103,6 +105,7 @@ fn test_bc1_mip_splitting_full_chain() {
         texb: "TEXB0004".into(),
         size: payload.len() as u32,
         dimension: [w, h],
+        real_dimension: [w, h],
         image_count: 1,
         mipmap_count: 3,
         actual_mip_count: 1,
@@ -152,6 +155,7 @@ fn test_bc1_mip_splitting_truncated_payload() {
         texb: "TEXB0004".into(),
         size: payload.len() as u32,
         dimension: [w, h],
+        real_dimension: [w, h],
         image_count: 1,
         mipmap_count: 5, // we only have data for 3 of these
         actual_mip_count: 1,
@@ -189,6 +193,7 @@ fn test_r8_mip_chain_left_to_gpu() {
         texb: "TEXB0004".into(),
         size: payload.len() as u32,
         dimension: [4, 4],
+        real_dimension: [4, 4],
         image_count: 1,
         mipmap_count: 3, // 4x4 → 2x2 → 1x1
         actual_mip_count: 1,
@@ -222,6 +227,7 @@ fn test_default_state_after_construction() {
         texb: "TEXB0004".into(),
         size: payload.len() as u32,
         dimension: [64, 64],
+        real_dimension: [64, 64],
         image_count: 1,
         mipmap_count: 8,
         actual_mip_count: 1,

@@ -32,6 +32,12 @@ pub struct Tex {
     pub texb: String,
     pub size: u32,
     pub dimension: [u32; 2],
+    /// The *real* (non-padded) size of the image stored in this texture.
+    ///
+    /// Wallpaper Engine pads the stored texture to a power of two; only the
+    /// top-left `real_dimension` region holds the actual image.  The
+    /// renderer has to clamp the quad's UVs to that region.
+    pub real_dimension: [u32; 2],
     pub image_count: u32,
     /// Mipmap chain length advertised by the `.tex` header. `0` for older
     /// `TEXB0001/0002/0003` headers that don't carry a mip count. This is
@@ -90,12 +96,26 @@ impl Tex {
         // Reserved (4 bytes)
         skip(bytes, &mut pos, 4)?;
 
-        // Width, Height (u32 × 2)
+        // Width, Height (u32 × 2) — the *padded* (power of two) storage size
         let w = read_u32(bytes, &mut pos)?;
         let h = read_u32(bytes, &mut pos)?;
 
-        // 12 bytes reserved/padding
-        skip(bytes, &mut pos, 12)?;
+        // The *real* (non-padded) image size follows the storage size.  The
+        // image only occupies the top-left `real_dimension` region of the
+        // stored texture; the rest is padding.
+        let real_w = read_u32(bytes, &mut pos)?;
+        let real_h = read_u32(bytes, &mut pos)?;
+
+        // 4 bytes reserved/padding
+        skip(bytes, &mut pos, 4)?;
+
+        // Fall back to the storage size when the header does not carry a
+        // usable real size.
+        let real_dimension = if real_w > 0 && real_h > 0 && real_w <= w && real_h <= h {
+            [real_w, real_h]
+        } else {
+            [w, h]
+        };
 
         // TEXB0003 or TEXB0004 (8 bytes)
         let texb_magic = read_magic(bytes, &mut pos)?;
@@ -157,6 +177,7 @@ impl Tex {
             texb,
             size: payload_size as u32,
             dimension: [w, h],
+            real_dimension,
             image_count,
             mipmap_count,
             // Right after parsing only level 0 (in `payload`) is present.
