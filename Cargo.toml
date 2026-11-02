@@ -6,7 +6,9 @@ description = "A parser for Wallpaper Engine pkg, tex, mdl and video files"
 license = "GPL-3.0"
 
 [dependencies]
+ahash = "0.8.12"
 bcndecode = "0.2.0"
+hashbrown = "0.15.5"
 image = "0.25.9"
 log = "0.4"
 lz4_flex = "0.12.0"

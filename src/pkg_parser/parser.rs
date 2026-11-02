@@ -1,5 +1,4 @@
 use std::{
-    collections::HashMap,
     fs::{self, File, create_dir_all},
     io::{self, BufReader, Read, Seek, SeekFrom},
     path::Path,
@@ -8,10 +7,22 @@ use std::{
 use crate::pkg_parser::{mdl_parser, tex_parser, video_parser};
 use log;
 
+/// Table of the files inside a package.
+///
+/// `hashbrown`'s SwissTable with `ahash`'s fast hasher: unpacking a
+/// package inserts thousands of entries, and the caller then looks them up
+/// by path.
+pub type FileMap = hashbrown::HashMap<String, Vec<u8>, ahash::RandomState>;
+
+/// Create an empty [`FileMap`] with room for `capacity` entries.
+fn new_file_map(capacity: usize) -> FileMap {
+    FileMap::with_capacity_and_hasher(capacity, ahash::RandomState::default())
+}
+
 #[derive(Debug, Clone)]
 pub struct Pkg {
     pub header: Header,
-    pub files: HashMap<String, Vec<u8>>,
+    pub files: FileMap,
 }
 
 /// Package file header containing metadata
@@ -93,9 +104,9 @@ impl Pkg {
         Ok(entries)
     }
 
-    fn read_files(file: &mut BufReader<File>, entries: &[Entry]) -> io::Result<HashMap<String, Vec<u8>>> {
+    fn read_files(file: &mut BufReader<File>, entries: &[Entry]) -> io::Result<FileMap> {
         let data_start = file.stream_position()?;
-        let mut map = HashMap::with_capacity(entries.len());
+        let mut map = new_file_map(entries.len());
 
         // Sort by offset to read sequentially and avoid random seeking
         let mut sorted: Vec<&Entry> = entries.iter().collect();
