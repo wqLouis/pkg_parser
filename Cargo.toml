@@ -2,7 +2,7 @@
 name = "pkg_parser"
 version = "1.2.0"
 edition = "2024"
-description = "A tool to decompile wallpaper engine pkg and tex files"
+description = "A parser for Wallpaper Engine pkg, tex, mdl and video files"
 license = "GPL-3.0"
 
 [dependencies]
