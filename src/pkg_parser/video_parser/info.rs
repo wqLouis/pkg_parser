@@ -89,6 +89,11 @@ pub enum VideoError {
     Decode(String),
     /// I/O failure.
     Io(String),
+    /// The clip does not fit into the memory budget of the eager decoding.
+    ///
+    /// The clip was *not* decoded: the caller can stream it instead (see
+    /// the [`bulk`](crate::pkg_parser::video_parser::bulk) module).
+    BudgetExceeded(String),
 }
 
 impl fmt::Display for VideoError {
@@ -97,6 +102,12 @@ impl fmt::Display for VideoError {
             VideoError::Unsupported(message) => write!(f, "unsupported video: {message}"),
             VideoError::Decode(message) => write!(f, "video decoding failed: {message}"),
             VideoError::Io(message) => write!(f, "video I/O failed: {message}"),
+            VideoError::BudgetExceeded(message) => {
+                write!(
+                    f,
+                    "the video does not fit into the memory budget: {message}"
+                )
+            }
         }
     }
 }

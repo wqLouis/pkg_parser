@@ -284,18 +284,29 @@ impl FfmpegBackend {
         let stride = output.stride(0);
         let row_bytes = out_width as usize * 4;
         let pixels = output.data(0);
-        let mut rgba = Vec::with_capacity(row_bytes * out_height as usize);
-        for row in 0..out_height as usize {
-            let start = row * stride;
-            rgba.extend_from_slice(&pixels[start..start + row_bytes]);
-        }
+        let size = row_bytes * out_height as usize;
+
+        // The pixels are copied into the `Arc` directly: the frame is not
+        // copied twice (into a `Vec` and then into the `Arc`).
+        let rgba = if stride == row_bytes {
+            // The rows are packed: the whole plane is copied at once.
+            Arc::<[u8]>::from(&pixels[..size])
+        } else {
+            // The rows are padded: they are copied one by one into a
+            // buffer that is then shared.
+            let mut buffer = Vec::with_capacity(size);
+            for row in pixels.chunks(stride) {
+                buffer.extend_from_slice(&row[..row_bytes]);
+            }
+            Arc::<[u8]>::from(buffer)
+        };
 
         Ok(Some(VideoFrame {
             width: out_width,
             height: out_height,
             time,
             duration,
-            rgba: Arc::from(rgba),
+            rgba,
         }))
     }
 }

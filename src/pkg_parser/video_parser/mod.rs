@@ -3,8 +3,8 @@
 //!
 //! The module is split in two halves:
 //!
-//! * the *core* ([`backend`], [`info`], [`player`]) is plain Rust and does
-//!   not depend on any native library, so it can be compiled for
+//! * the *core* ([`backend`], [`info`], [`player`], [`bulk`]) is plain Rust
+//!   and does not depend on any native library, so it can be compiled for
 //!   `wasm32-unknown-unknown` and run in a browser;
 //! * the *decoders* ([`GifBackend`], [`ImageBackend`], [`FfmpegBackend`])
 //!   implement the [`FrameDecoder`] trait and are plugged into the core.
@@ -21,6 +21,7 @@
 //! `wasm32-unknown-unknown`.
 
 pub mod backend;
+pub mod bulk;
 pub mod info;
 pub mod mp4_meta;
 pub mod player;
@@ -44,6 +45,11 @@ use std::sync::Arc;
 use image::{ImageBuffer, Rgba};
 
 pub use backend::{BackendKind, FrameDecoder, VideoBackend, detect_format};
+pub use bulk::{
+    DEFAULT_MEMORY_BUDGET, DecodedClip, MEMORY_BUDGET_ENV, decode_all, decode_all_with_backend,
+    decode_all_with_budget, estimate_decoded_size, memory_budget, reset_memory_budget,
+    set_memory_budget,
+};
 #[cfg(all(feature = "ffmpeg", not(target_arch = "wasm32")))]
 pub use ffmpeg::FfmpegBackend;
 pub use gif::GifBackend;
