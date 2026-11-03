@@ -4,7 +4,7 @@ use std::{
     path::Path,
 };
 
-use crate::pkg_parser::{mdl_parser, tex_parser, video_parser};
+use crate::pkg_parser::{mdl_parser, tex_parser, video_extract, video_parser};
 use log;
 
 /// A source the package reader can walk through: the archive is parsed
@@ -219,46 +219,44 @@ fn save_tex_file(path: &str, bytes: &[u8], output_path: &Path, dry_run: bool) {
 }
 
 /// Process and save a video or GIF file.
+///
+/// The raw file is always written; the frames of the clip are extracted as
+/// PNG files and the metadata of the clip is written next to them.
 fn save_video_file(path: &str, bytes: &[u8], output_path: &Path, dry_run: bool) {
-    let Some(video) = video_parser::Video::new(bytes) else {
+    // Only the magic bytes are looked at here: the clip itself is decoded by
+    // the extraction, which does not need a copy of the payload.
+    let Some(format) = video_parser::detect_format(bytes) else {
         log::warn!("failed to parse video/gif: {}", path);
         return;
     };
 
     log::info!("Video/GIF: {}", path);
-    log::debug!("  Format: {:?}", video.format);
-    if let Some((w, h)) = video.dimensions {
-        log::debug!("  Dimensions: {}x{}", w, h);
-    }
-    if let Some(count) = video.frame_count {
-        log::debug!("  Frame count: {}", count);
+    log::debug!("  Format: {:?}", format);
+
+    // The raw file is the asset the wallpaper engine plays: it is written
+    // even when the clip cannot be decoded.
+    if !dry_run && let Err(error) = write_raw_file(output_path, bytes) {
+        log::warn!("cannot write {}: {}", output_path.display(), error);
     }
 
-    if video.is_gif() {
-        // Save GIF as-is and also extract frames
-        if !dry_run {
-            create_dir_all(output_path.parent().unwrap()).unwrap();
-            fs::write(output_path, bytes).unwrap();
-        }
+    let stem = Path::new(path)
+        .file_stem()
+        .unwrap_or_default()
+        .to_str()
+        .unwrap_or("output");
 
-        let stem = Path::new(path)
-            .file_stem()
-            .unwrap_or_default()
-            .to_str()
-            .unwrap_or("output");
-        if let Some(frames) = video_parser::save_gif_frames(bytes, stem) {
-            for (frame_data, suffix) in &frames {
-                let frame_path = output_path.with_file_name(suffix);
-                if !dry_run {
-                    fs::write(&frame_path, frame_data).unwrap();
-                }
-            }
-        }
-    } else if !dry_run {
-        // Save video/gif file as-is
-        create_dir_all(output_path.parent().unwrap()).unwrap();
-        fs::write(output_path, bytes).unwrap();
+    let extraction = video_extract::extract_video(bytes, stem, output_path, dry_run);
+    log::info!("Extracted {} frames from {}", extraction.frames, path);
+}
+
+/// Write the raw video or GIF file, creating the parent directory.
+fn write_raw_file(output_path: &Path, bytes: &[u8]) -> io::Result<()> {
+    if let Some(parent) = output_path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        create_dir_all(parent)?;
     }
+    fs::write(output_path, bytes)
 }
 
 /// Process and save a .mdl puppet model file.
