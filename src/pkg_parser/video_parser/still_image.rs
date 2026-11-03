@@ -16,7 +16,7 @@ use image::imageops::FilterType;
 use log::debug;
 
 use crate::pkg_parser::video_parser::backend::FrameDecoder;
-use crate::pkg_parser::video_parser::info::{VideoError, VideoFrame, VideoInfo};
+use crate::pkg_parser::video_parser::info::{FrameStatus, VideoError, VideoFrame, VideoInfo};
 
 /// The still image formats the backend recognises.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,11 +165,11 @@ impl FrameDecoder for ImageBackend {
         })
     }
 
-    fn next_frame(&mut self) -> Result<Option<VideoFrame>, VideoError> {
+    fn next_frame(&mut self) -> Result<FrameStatus, VideoError> {
         // A still image has a single frame: once it was handed out, the
         // stream is over.
         if self.consumed {
-            return Ok(None);
+            return Ok(FrameStatus::End);
         }
 
         let output_size = self.output_size;
@@ -187,7 +187,7 @@ impl FrameDecoder for ImageBackend {
 
         self.consumed = true;
 
-        Ok(Some(VideoFrame {
+        Ok(FrameStatus::Frame(VideoFrame {
             width: out_width,
             height: out_height,
             time: 0.0,

@@ -5,8 +5,12 @@
 //! that any implementation — ffmpeg on native targets, a WebCodecs bridge in
 //! the browser — can satisfy it.  Random access is implemented by the player
 //! on top of it.
+//!
+//! A decoder that cannot hand out a frame on demand — the browser's
+//! WebCodecs, the HTML media element — reports [`FrameStatus::Pending`]
+//! instead of blocking: the caller asks again later.
 
-use crate::pkg_parser::video_parser::info::{VideoError, VideoFormat, VideoFrame, VideoInfo};
+use crate::pkg_parser::video_parser::info::{FrameStatus, VideoError, VideoFormat, VideoInfo};
 
 /// A pluggable frame decoding backend.
 ///
@@ -18,6 +22,9 @@ use crate::pkg_parser::video_parser::info::{VideoError, VideoFormat, VideoFrame,
 /// The trait is intentionally *sequential* (decode the next frame / rewind) so that any
 /// implementation — ffmpeg on native targets, a WebCodecs bridge in the browser — can
 /// satisfy it. Random access is implemented by the player on top of it.
+///
+/// An asynchronous decoder — one that cannot produce a frame on demand —
+/// answers [`FrameStatus::Pending`] and is asked again later.
 pub trait FrameDecoder {
     /// Short, stable identifier of the backend (e.g. `"ffmpeg"`, `"gif"`, `"image"`).
     fn name(&self) -> &'static str;
@@ -25,8 +32,11 @@ pub trait FrameDecoder {
     /// Inspect the container: dimensions, duration, fps, codec, …
     fn probe(&mut self) -> Result<VideoInfo, VideoError>;
 
-    /// Decode the next frame in presentation order. `Ok(None)` = end of stream.
-    fn next_frame(&mut self) -> Result<Option<VideoFrame>, VideoError>;
+    /// Decode the next frame in presentation order.
+    ///
+    /// Returns `FrameStatus::Pending` when an asynchronous decoder is not
+    /// ready yet, and `FrameStatus::End` at the end of the stream.
+    fn next_frame(&mut self) -> Result<FrameStatus, VideoError>;
 
     /// Restart decoding from the beginning of the stream.
     fn rewind(&mut self) -> Result<(), VideoError>;

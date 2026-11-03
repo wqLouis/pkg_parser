@@ -15,8 +15,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use image::codecs::gif::GifEncoder;
 use image::{Delay, Frame, RgbaImage};
 use pkg_parser::pkg_parser::video_parser::{
-    BackendKind, FrameDecoder, Video, VideoError, VideoFormat, VideoFrame, VideoInfo, VideoPlayer,
-    detect_format,
+    BackendKind, FrameDecoder, FrameStatus, Video, VideoError, VideoFormat, VideoFrame, VideoInfo,
+    VideoPlayer, detect_format,
 };
 
 /// A backend producing three synthetic 2x2 frames at t = 0.0 / 0.5 / 1.0.
@@ -73,17 +73,112 @@ impl FrameDecoder for MockBackend {
         })
     }
 
-    fn next_frame(&mut self) -> Result<Option<VideoFrame>, VideoError> {
-        let frame = self.frames.get(self.next).cloned();
-        if frame.is_some() {
-            self.next += 1;
-            self.decoded.fetch_add(1, Ordering::Relaxed);
+    fn next_frame(&mut self) -> Result<FrameStatus, VideoError> {
+        match self.frames.get(self.next).cloned() {
+            Some(frame) => {
+                self.next += 1;
+                self.decoded.fetch_add(1, Ordering::Relaxed);
+                Ok(FrameStatus::Frame(frame))
+            }
+            None => Ok(FrameStatus::End),
         }
-        Ok(frame)
     }
 
     fn rewind(&mut self) -> Result<(), VideoError> {
         self.next = 0;
+        Ok(())
+    }
+}
+
+/// A backend that reports "not ready yet" before every frame.
+///
+/// The backend mimics an asynchronous decoder (the browser's WebCodecs, the
+/// HTML media element): it cannot hand out a frame on demand, so it answers
+/// [`FrameStatus::Pending`] a couple of times before the frame is ready.
+struct PendingBackend {
+    /// The frames the backend hands out.
+    frames: Vec<VideoFrame>,
+    /// Index of the next frame.
+    next: usize,
+    /// How many times the backend reports "pending" before every frame.
+    rounds: usize,
+    /// How many times the backend still has to report "pending".
+    pending: usize,
+    /// How many times the backend reported "pending" (shared with the test).
+    pendings: Arc<AtomicUsize>,
+}
+
+impl PendingBackend {
+    /// Build a backend that reports "pending" `rounds` times before every frame.
+    ///
+    /// The counter of the "pending" answers is returned as well, so that the
+    /// test can check that the backend was really asked.
+    fn new(rounds: usize) -> (Self, Arc<AtomicUsize>) {
+        let frames = [0u8, 1, 2]
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| VideoFrame {
+                width: 2,
+                height: 2,
+                time: index as f64 * 0.5,
+                duration: 0.5,
+                rgba: Arc::from(vec![value; 2 * 2 * 4]),
+            })
+            .collect();
+
+        let pendings = Arc::new(AtomicUsize::new(0));
+        let backend = Self {
+            frames,
+            next: 0,
+            rounds,
+            pending: rounds,
+            pendings: pendings.clone(),
+        };
+
+        (backend, pendings)
+    }
+}
+
+impl FrameDecoder for PendingBackend {
+    fn name(&self) -> &'static str {
+        "pending"
+    }
+
+    fn probe(&mut self) -> Result<VideoInfo, VideoError> {
+        Ok(VideoInfo {
+            width: 2,
+            height: 2,
+            duration: 1.5,
+            fps: 2.0,
+            frame_count: 3,
+            codec: "pending".to_string(),
+            pixel_format: "rgba8".to_string(),
+            has_audio: false,
+        })
+    }
+
+    fn next_frame(&mut self) -> Result<FrameStatus, VideoError> {
+        // The decoder is still working on the frame: it is not ready yet.
+        if self.pending > 0 {
+            self.pending -= 1;
+            self.pendings.fetch_add(1, Ordering::Relaxed);
+            return Ok(FrameStatus::Pending);
+        }
+
+        match self.frames.get(self.next).cloned() {
+            Some(frame) => {
+                self.next += 1;
+                // The next frame has to be waited for as well.
+                self.pending = self.rounds;
+                Ok(FrameStatus::Frame(frame))
+            }
+            None => Ok(FrameStatus::End),
+        }
+    }
+
+    fn rewind(&mut self) -> Result<(), VideoError> {
+        self.next = 0;
+        self.pending = self.rounds;
         Ok(())
     }
 }
@@ -161,6 +256,47 @@ fn the_player_works_with_any_backend() {
     // A backwards jump rewinds the backend and starts from the first frame.
     let again = player.frame_at(0.1).unwrap().expect("no frame");
     assert_eq!(again.rgba[0], 0);
+}
+
+/// An asynchronous decoder that is not ready yet does not stop the playback.
+///
+/// The backend reports "pending" a couple of times before every frame: the
+/// player has to keep the frame that is on screen and hand out the next one
+/// as soon as it is ready.
+#[test]
+fn a_pending_backend_keeps_the_frame_that_is_on_screen() {
+    let (backend, pendings) = PendingBackend::new(2);
+    let mut player =
+        VideoPlayer::open_with_backend(&[], Box::new(backend)).expect("cannot open the backend");
+
+    // The decoder is not ready yet and no frame was decoded: there is
+    // nothing to show.
+    assert!(player.frame_at(0.0).unwrap().is_none());
+    assert!(player.frame_at(0.0).unwrap().is_none());
+
+    // The third call gets the first frame; the decoder is pending again for
+    // the next one, so the frame that is on screen is served.
+    let first = player.frame_at(0.0).unwrap().expect("no frame");
+    assert_eq!(first.rgba[0], 0);
+
+    // While the decoder is pending, the frame that is on screen stays there.
+    let pending = player.frame_at(0.6).unwrap().expect("no frame");
+    assert_eq!(pending.rgba[0], 0, "the cached frame must stay on screen");
+    assert!(
+        pendings.load(Ordering::Relaxed) > 0,
+        "the backend must have been asked for a frame"
+    );
+
+    // The next frame is served as soon as it is ready.
+    let second = player.frame_at(0.6).unwrap().expect("no frame");
+    assert_eq!(second.rgba[0], 1);
+
+    // The stream was not considered finished while the decoder was pending:
+    // the last frame is decoded and served.
+    let third = player.frame_at(1.2).unwrap().expect("no frame");
+    assert_eq!(third.rgba[0], 1, "the decoder is still pending");
+    let last = player.frame_at(1.2).unwrap().expect("no frame");
+    assert_eq!(last.rgba[0], 2);
 }
 
 /// The GIF backend decodes every frame of the animation.

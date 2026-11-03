@@ -12,8 +12,8 @@ use std::sync::Arc;
 use image::codecs::gif::GifEncoder;
 use image::{Delay, Frame, RgbaImage};
 use pkg_parser::pkg_parser::video_parser::{
-    BackendKind, FrameDecoder, ImageBackend, ImageFormat, VideoBackend, VideoError, VideoFrame,
-    VideoInfo, VideoPlayer, backend_for, detect_image_format,
+    BackendKind, FrameDecoder, FrameStatus, ImageBackend, ImageFormat, VideoBackend, VideoError,
+    VideoFrame, VideoInfo, VideoPlayer, backend_for, detect_image_format,
 };
 
 /// Build a 4x4 png in memory.
@@ -89,17 +89,23 @@ fn the_image_backend_decodes_a_single_frame() {
     assert_eq!(info.height, 4);
     assert_eq!(info.frame_count, 1);
 
-    let frame = backend.next_frame().unwrap().expect("no frame");
+    let frame = match backend.next_frame().unwrap() {
+        FrameStatus::Frame(frame) => frame,
+        status => panic!("unexpected status: {status:?}"),
+    };
     assert_eq!(frame.width, 4);
     assert_eq!(frame.height, 4);
     assert_eq!(frame.rgba.len(), 4 * 4 * 4);
 
     // The single frame was handed out: the stream is over.
-    assert!(backend.next_frame().unwrap().is_none());
+    assert!(matches!(backend.next_frame().unwrap(), FrameStatus::End));
 
     // A rewind makes the frame available again.
     backend.rewind().expect("cannot rewind the backend");
-    let replayed = backend.next_frame().unwrap().expect("no frame");
+    let replayed = match backend.next_frame().unwrap() {
+        FrameStatus::Frame(frame) => frame,
+        status => panic!("unexpected status: {status:?}"),
+    };
     assert_eq!(replayed.rgba, frame.rgba);
 }
 
@@ -110,7 +116,10 @@ fn the_image_backend_can_be_rescaled() {
     let mut backend = ImageBackend::new(Arc::from(bytes.as_slice()));
     backend.set_output_size(8, 8);
 
-    let frame = backend.next_frame().unwrap().expect("no frame");
+    let frame = match backend.next_frame().unwrap() {
+        FrameStatus::Frame(frame) => frame,
+        status => panic!("unexpected status: {status:?}"),
+    };
     assert_eq!(frame.width, 8);
     assert_eq!(frame.height, 8);
     assert_eq!(frame.rgba.len(), 8 * 8 * 4);
@@ -200,12 +209,12 @@ impl VideoBackend for AliasBackend {
         })
     }
 
-    fn next_frame(&mut self) -> Result<Option<VideoFrame>, VideoError> {
+    fn next_frame(&mut self) -> Result<FrameStatus, VideoError> {
         if self.decoded {
-            return Ok(None);
+            return Ok(FrameStatus::End);
         }
         self.decoded = true;
-        Ok(Some(VideoFrame {
+        Ok(FrameStatus::Frame(VideoFrame {
             width: 1,
             height: 1,
             time: 0.0,

@@ -34,7 +34,7 @@ pub use backend::{BackendKind, FrameDecoder, VideoBackend, detect_format};
 #[cfg(feature = "ffmpeg")]
 pub use ffmpeg::FfmpegBackend;
 pub use gif::GifBackend;
-pub use info::{VideoError, VideoFormat, VideoFrame, VideoInfo};
+pub use info::{FrameStatus, VideoError, VideoFormat, VideoFrame, VideoInfo};
 pub use player::VideoPlayer;
 pub use still_image::{ImageBackend, ImageFormat, detect_image_format};
 

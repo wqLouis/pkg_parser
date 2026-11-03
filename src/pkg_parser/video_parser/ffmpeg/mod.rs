@@ -17,7 +17,9 @@ use ffmpeg_next::util::frame::video::Video as Frame;
 use log::{debug, warn};
 
 use crate::pkg_parser::video_parser::backend::{FrameDecoder, detect_format};
-use crate::pkg_parser::video_parser::info::{VideoError, VideoFormat, VideoFrame, VideoInfo};
+use crate::pkg_parser::video_parser::info::{
+    FrameStatus, VideoError, VideoFormat, VideoFrame, VideoInfo,
+};
 
 /// How many packets are pulled from the demuxer at once.
 ///
@@ -343,18 +345,18 @@ impl FrameDecoder for FfmpegBackend {
         })
     }
 
-    fn next_frame(&mut self) -> Result<Option<VideoFrame>, VideoError> {
+    fn next_frame(&mut self) -> Result<FrameStatus, VideoError> {
         self.ensure_open()?;
 
         loop {
             // Try to get a decoded frame first.
             if let Some(frame) = self.receive_frame()? {
-                return Ok(Some(frame));
+                return Ok(FrameStatus::Frame(frame));
             }
 
             // The decoder is drained: the stream is over.
             if self.eof_sent {
-                return Ok(None);
+                return Ok(FrameStatus::End);
             }
 
             // Feed the decoder with the next packet.

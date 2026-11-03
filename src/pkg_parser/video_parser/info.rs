@@ -62,6 +62,21 @@ pub struct VideoFrame {
     pub rgba: Arc<[u8]>,
 }
 
+/// The outcome of asking a decoder for the next frame.
+#[derive(Debug)]
+pub enum FrameStatus {
+    /// A frame was decoded and is ready to be shown.
+    Frame(VideoFrame),
+    /// The decoder is still working on it: the frame is not ready yet.
+    ///
+    /// Asynchronous decoders — the browser's WebCodecs, the HTML media
+    /// element — cannot produce a frame on demand. They report "not yet" and
+    /// the caller asks again later. Synchronous decoders never return this.
+    Pending,
+    /// The end of the stream was reached.
+    End,
+}
+
 /// Everything that can go wrong while opening or decoding a video.
 #[derive(Debug)]
 pub enum VideoError {

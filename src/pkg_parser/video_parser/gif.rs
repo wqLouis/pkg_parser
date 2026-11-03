@@ -12,7 +12,7 @@ use image::{AnimationDecoder, ImageDecoder, RgbaImage, codecs::gif::GifDecoder};
 use log::debug;
 
 use crate::pkg_parser::video_parser::backend::FrameDecoder;
-use crate::pkg_parser::video_parser::info::{VideoError, VideoFrame, VideoInfo};
+use crate::pkg_parser::video_parser::info::{FrameStatus, VideoError, VideoFrame, VideoInfo};
 
 /// Pure-Rust GIF backend built on the `image` crate (no ffmpeg, wasm-friendly).
 ///
@@ -86,7 +86,7 @@ impl FrameDecoder for GifBackend {
         })
     }
 
-    fn next_frame(&mut self) -> Result<Option<VideoFrame>, VideoError> {
+    fn next_frame(&mut self) -> Result<FrameStatus, VideoError> {
         if self.frames.is_none() {
             let decoder = self.decoder()?;
             self.frames = Some(decoder.into_frames());
@@ -101,7 +101,7 @@ impl FrameDecoder for GifBackend {
             Some(frame) => frame.map_err(|error| {
                 VideoError::Decode(format!("cannot decode a GIF frame: {error}"))
             })?,
-            None => return Ok(None),
+            None => return Ok(FrameStatus::End),
         };
 
         let delay = delay_seconds(frame.delay());
@@ -111,7 +111,7 @@ impl FrameDecoder for GifBackend {
         let time = self.time;
         self.time += delay;
 
-        Ok(Some(VideoFrame {
+        Ok(FrameStatus::Frame(VideoFrame {
             width,
             height,
             time,
