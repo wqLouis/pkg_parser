@@ -1,14 +1,60 @@
+//! Video support: container detection, pluggable decoding backends and a
+//! simple frame scheduler.
+//!
+//! The module is split in two halves:
+//!
+//! * the *core* ([`backend`], [`info`], [`player`]) is plain Rust and does
+//!   not depend on any native library, so it can be compiled for
+//!   `wasm32-unknown-unknown` and run in a browser;
+//! * the *decoders* ([`GifBackend`], [`FfmpegBackend`]) implement the
+//!   [`VideoBackend`] trait and are plugged into the core.
+//!
+//! The ffmpeg based decoder is only compiled when the `ffmpeg` cargo feature
+//! is enabled (it is on by default); it is the only place in the crate that
+//! is allowed to mention `ffmpeg_next`.
+
+pub mod backend;
+pub mod info;
+pub mod player;
+
+#[cfg(feature = "ffmpeg")]
+mod ffmpeg;
+mod gif;
+
 use std::io::Cursor;
 
-use image::{AnimationDecoder, ImageBuffer, ImageDecoder, Rgba, codecs::gif::GifDecoder};
+use image::{ImageBuffer, Rgba};
 
-/// Detected video or GIF format.
-#[derive(Debug, Clone, PartialEq)]
-pub enum VideoFormat {
-    Mp4,
-    WebM,
-    Gif,
-    Unknown(String),
+pub use backend::{BackendKind, VideoBackend, detect_format};
+#[cfg(feature = "ffmpeg")]
+pub use ffmpeg::FfmpegBackend;
+pub use gif::GifBackend;
+pub use info::{VideoError, VideoFormat, VideoFrame, VideoInfo};
+pub use player::VideoPlayer;
+
+/// Create the ffmpeg backend.
+///
+/// Without the `ffmpeg` cargo feature the crate has no native decoder at all,
+/// so the caller gets an [`VideoError::Unsupported`] instead.
+#[cfg(feature = "ffmpeg")]
+pub(crate) fn ffmpeg_backend(
+    bytes: std::sync::Arc<[u8]>,
+) -> Result<Box<dyn VideoBackend>, VideoError> {
+    Ok(Box::new(ffmpeg::FfmpegBackend::new(bytes)))
+}
+
+/// Create the ffmpeg backend.
+///
+/// Without the `ffmpeg` cargo feature the crate has no native decoder at all,
+/// so the caller gets an [`VideoError::Unsupported`] instead.
+#[cfg(not(feature = "ffmpeg"))]
+pub(crate) fn ffmpeg_backend(
+    _bytes: std::sync::Arc<[u8]>,
+) -> Result<Box<dyn VideoBackend>, VideoError> {
+    Err(VideoError::Unsupported(
+        "this build of pkg_parser has no ffmpeg support; rebuild it with the `ffmpeg` feature"
+            .to_string(),
+    ))
 }
 
 /// Parsed video or GIF data from a package file.
@@ -28,7 +74,7 @@ impl Video {
         let format = detect_format(bytes)?;
 
         let (dimensions, frame_count) = match &format {
-            VideoFormat::Gif => extract_gif_info(bytes),
+            VideoFormat::Gif => gif::gif_info(bytes),
             _ => (None, None),
         };
 
@@ -56,7 +102,7 @@ impl Video {
     /// frame decoding would require a heavier dependency (ffmpeg etc.).
     pub fn extract_frame(&self, index: u32) -> Option<Vec<u8>> {
         match &self.format {
-            VideoFormat::Gif => extract_gif_frame(&self.data, index),
+            VideoFormat::Gif => gif::gif_frame(&self.data, index),
             _ => None,
         }
     }
@@ -64,72 +110,10 @@ impl Video {
     /// Extract all frames from a GIF as RGBA pixel buffers.
     pub fn extract_all_frames(&self) -> Option<Vec<Vec<u8>>> {
         match &self.format {
-            VideoFormat::Gif => {
-                let decoder = GifDecoder::new(Cursor::new(&self.data)).ok()?;
-                let frames = decoder.into_frames().collect_frames().ok()?;
-                Some(
-                    frames
-                        .into_iter()
-                        .map(|f| f.into_buffer().into_raw())
-                        .collect(),
-                )
-            }
+            VideoFormat::Gif => gif::gif_all_frames(&self.data),
             _ => None,
         }
     }
-}
-
-/// Detect the format from magic bytes.
-fn detect_format(bytes: &[u8]) -> Option<VideoFormat> {
-    // MP4/QuickTime: starts with ftyp box (size + "ftyp")
-    if bytes.len() >= 8 && bytes[4..8] == [0x66, 0x74, 0x79, 0x70] {
-        return Some(VideoFormat::Mp4);
-    }
-    // WebM: starts with EBML header
-    if bytes.len() >= 4 && bytes[..4] == [0x1A, 0x45, 0xDF, 0xA3] {
-        return Some(VideoFormat::WebM);
-    }
-    // GIF87a or GIF89a
-    if bytes.len() >= 6
-        && bytes[..3] == [0x47, 0x49, 0x46]
-        && bytes[3] == 0x38
-        && (bytes[4] == 0x37 || bytes[4] == 0x39)
-        && bytes[5] == 0x61
-    {
-        return Some(VideoFormat::Gif);
-    }
-    None
-}
-
-/// Extract basic info (dimensions, frame count) from a GIF.
-fn extract_gif_info(bytes: &[u8]) -> (Option<(u32, u32)>, Option<u32>) {
-    let decoder = GifDecoder::new(Cursor::new(bytes));
-    let decoder = match decoder {
-        Ok(d) => d,
-        Err(_) => return (None, None),
-    };
-
-    let dimensions = match decoder.dimensions() {
-        (w, h) if w > 0 && h > 0 => Some((w, h)),
-        _ => None,
-    };
-
-    let frame_count = decoder
-        .into_frames()
-        .collect_frames()
-        .ok()
-        .map(|frames| frames.len() as u32);
-
-    (dimensions, frame_count)
-}
-
-/// Extract a single frame from a GIF by index.
-fn extract_gif_frame(bytes: &[u8], index: u32) -> Option<Vec<u8>> {
-    let decoder = GifDecoder::new(Cursor::new(bytes)).ok()?;
-    let frames = decoder.into_frames().collect_frames().ok()?;
-
-    let frame = frames.into_iter().nth(index as usize)?;
-    Some(frame.into_buffer().into_raw())
 }
 
 /// Save all frames of a GIF as separate PNG files, returning
@@ -137,6 +121,9 @@ fn extract_gif_frame(bytes: &[u8], index: u32) -> Option<Vec<u8>> {
 /// The `stem` should be the base file name without extension
 /// (e.g. "animation" for "animation.gif").
 pub fn save_gif_frames(bytes: &[u8], stem: &str) -> Option<Vec<(Vec<u8>, String)>> {
+    use image::AnimationDecoder;
+    use image::codecs::gif::GifDecoder;
+
     let decoder = GifDecoder::new(Cursor::new(bytes)).ok()?;
     let frames = decoder.into_frames().collect_frames().ok()?;
 
