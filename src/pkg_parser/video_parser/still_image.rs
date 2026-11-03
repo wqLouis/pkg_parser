@@ -74,8 +74,8 @@ pub fn detect_image_format(bytes: &[u8]) -> Option<ImageFormat> {
 /// Pure-Rust still image backend built on the `image` crate (no ffmpeg,
 /// wasm-friendly).
 ///
-/// The backend keeps the raw bytes around so that it can decode the image
-/// again after a [`rewind`](FrameDecoder::rewind).
+/// The backend keeps the decoded pixels around, so a [`rewind`](FrameDecoder::rewind)
+/// can hand out the frame again without decoding it a second time.
 ///
 /// A still image is a stream with exactly one frame: the frame is handed out
 /// once and the backend then reports the end of the stream.

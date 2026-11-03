@@ -20,22 +20,23 @@ pub mod player;
 #[cfg(feature = "ffmpeg")]
 mod ffmpeg;
 mod gif;
-mod image;
+// The module is named `still_image` and not `image`: a module called
+// `image` would shadow the `image` crate inside this file, and every
+// `image::…` path would silently resolve to the module instead.
+mod still_image;
 
 use std::io::Cursor;
 use std::sync::Arc;
 
-// The module is called `image`, like the crate it decodes the pictures with:
-// the paths of the external crate have to be absolute to avoid the ambiguity.
-use ::image::{ImageBuffer, Rgba};
+use image::{ImageBuffer, Rgba};
 
 pub use backend::{BackendKind, FrameDecoder, VideoBackend, detect_format};
 #[cfg(feature = "ffmpeg")]
 pub use ffmpeg::FfmpegBackend;
 pub use gif::GifBackend;
-pub use image::{ImageBackend, ImageFormat, detect_image_format};
 pub use info::{VideoError, VideoFormat, VideoFrame, VideoInfo};
 pub use player::VideoPlayer;
+pub use still_image::{ImageBackend, ImageFormat, detect_image_format};
 
 /// Pick the backend that can decode `bytes`, based on the container/format.
 ///
@@ -149,8 +150,8 @@ impl Video {
 /// The `stem` should be the base file name without extension
 /// (e.g. "animation" for "animation.gif").
 pub fn save_gif_frames(bytes: &[u8], stem: &str) -> Option<Vec<(Vec<u8>, String)>> {
-    use ::image::AnimationDecoder;
-    use ::image::codecs::gif::GifDecoder;
+    use image::AnimationDecoder;
+    use image::codecs::gif::GifDecoder;
 
     let decoder = GifDecoder::new(Cursor::new(bytes)).ok()?;
     let frames = decoder.into_frames().collect_frames().ok()?;
@@ -163,7 +164,7 @@ pub fn save_gif_frames(bytes: &[u8], stem: &str) -> Option<Vec<(Vec<u8>, String)
         let mut png_buf = Vec::new();
         let mut cur = Cursor::new(&mut png_buf);
         ImageBuffer::<Rgba<u8>, Vec<u8>>::from_raw(w, h, rgba.into_raw())?
-            .write_to(&mut cur, ::image::ImageFormat::Png)
+            .write_to(&mut cur, image::ImageFormat::Png)
             .ok()?;
 
         results.push((png_buf, format!("{}_frame_{:04}.png", stem, i)));

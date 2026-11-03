@@ -11,7 +11,7 @@ use log::debug;
 
 use crate::pkg_parser::video_parser::backend::{BackendKind, FrameDecoder, detect_format};
 use crate::pkg_parser::video_parser::gif::GifBackend;
-use crate::pkg_parser::video_parser::image::{ImageBackend, detect_image_format};
+use crate::pkg_parser::video_parser::still_image::{ImageBackend, detect_image_format};
 use crate::pkg_parser::video_parser::info::{VideoError, VideoFrame, VideoInfo};
 
 /// Number of decoded frames kept around by default.

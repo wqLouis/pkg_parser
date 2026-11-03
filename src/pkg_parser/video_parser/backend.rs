@@ -19,7 +19,7 @@ use crate::pkg_parser::video_parser::info::{VideoError, VideoFormat, VideoFrame,
 /// implementation — ffmpeg on native targets, a WebCodecs bridge in the browser — can
 /// satisfy it. Random access is implemented by the player on top of it.
 pub trait FrameDecoder {
-    /// Short, stable identifier of the backend (e.g. `"ffmpeg"`, `"gif"`).
+    /// Short, stable identifier of the backend (e.g. `"ffmpeg"`, `"gif"`, `"image"`).
     fn name(&self) -> &'static str;
 
     /// Inspect the container: dimensions, duration, fps, codec, …
