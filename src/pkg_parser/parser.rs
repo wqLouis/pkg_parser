@@ -1,11 +1,19 @@
 use std::{
     fs::{self, File, create_dir_all},
-    io::{self, BufReader, Read, Seek, SeekFrom},
+    io::{self, BufReader, Cursor, Read, Seek, SeekFrom},
     path::Path,
 };
 
 use crate::pkg_parser::{mdl_parser, tex_parser, video_parser};
 use log;
+
+/// A source the package reader can walk through: the archive is parsed
+/// sequentially and the file data is fetched by seeking, so the reader needs
+/// both traits.  Implemented for every `Read + Seek` type, which covers both
+/// files and in-memory buffers.
+trait ReadSeek: Read + Seek {}
+
+impl<T: Read + Seek> ReadSeek for T {}
 
 /// Table of the files inside a package.
 ///
@@ -47,6 +55,9 @@ impl Pkg {
     /// Returns `Ok(Pkg)` on success or `Err(io::Error)` if the file
     /// cannot be read or contains malformed data.
     pub fn new(pkg_path: &Path) -> Result<Pkg, io::Error> {
+        // Stream the archive straight from the file: the file map already
+        // holds a copy of every entry, so reading the whole archive into a
+        // second buffer first would double the peak memory usage.
         let mut file = BufReader::new(File::open(pkg_path)?);
         let header = Self::read_header(&mut file)?;
         let entries = Self::read_entries(&mut file, header.file_count)?;
@@ -55,7 +66,23 @@ impl Pkg {
         Ok(Pkg { header, files })
     }
 
-    fn read_header(file: &mut BufReader<File>) -> io::Result<Header> {
+    /// Parse a package from an in-memory buffer.
+    ///
+    /// This is the entry point for platforms without a filesystem (e.g. a browser build,
+    /// where the archive is fetched over HTTP).
+    ///
+    /// Returns `Ok(Pkg)` on success or `Err(io::Error)` if the buffer
+    /// contains malformed data.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Pkg, io::Error> {
+        let mut reader = BufReader::new(Cursor::new(bytes));
+        let header = Self::read_header(&mut reader)?;
+        let entries = Self::read_entries(&mut reader, header.file_count)?;
+        let files = Self::read_files(&mut reader, &entries)?;
+
+        Ok(Pkg { header, files })
+    }
+
+    fn read_header(file: &mut impl ReadSeek) -> io::Result<Header> {
         let mut buf = [0u8; 4];
 
         // Version string
@@ -76,7 +103,7 @@ impl Pkg {
         })
     }
 
-    fn read_entries(file: &mut BufReader<File>, entry_count: u32) -> io::Result<Vec<Entry>> {
+    fn read_entries(file: &mut impl ReadSeek, entry_count: u32) -> io::Result<Vec<Entry>> {
         let mut entries = Vec::with_capacity(entry_count as usize);
         let mut buf = [0u8; 4];
 
@@ -104,7 +131,7 @@ impl Pkg {
         Ok(entries)
     }
 
-    fn read_files(file: &mut BufReader<File>, entries: &[Entry]) -> io::Result<FileMap> {
+    fn read_files(file: &mut impl ReadSeek, entries: &[Entry]) -> io::Result<FileMap> {
         let data_start = file.stream_position()?;
         let mut map = new_file_map(entries.len());
 
@@ -139,7 +166,11 @@ impl Pkg {
 
             if parse_tex && ext.eq_ignore_ascii_case("tex") {
                 save_tex_file(path, bytes, &output_path, dry_run);
-            } else if parse_video && (ext.eq_ignore_ascii_case("mp4") || ext.eq_ignore_ascii_case("webm") || ext.eq_ignore_ascii_case("gif")) {
+            } else if parse_video
+                && (ext.eq_ignore_ascii_case("mp4")
+                    || ext.eq_ignore_ascii_case("webm")
+                    || ext.eq_ignore_ascii_case("gif"))
+            {
                 save_video_file(path, bytes, &output_path, dry_run);
             } else if parse_mdl && ext.eq_ignore_ascii_case("mdl") {
                 save_mdl_file(path, bytes, &output_path, dry_run);
