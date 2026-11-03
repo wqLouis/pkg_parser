@@ -86,7 +86,12 @@ pub struct WebVideoBackend {
     /// Whether a frame was handed out already.
     delivered: bool,
     /// Whether the media element was asked to play.
-    playing: bool,
+    ///
+    /// The flag is shared with the task that waits for the promise of
+    /// `play()`: a browser that refuses to play the video (because of its
+    /// autoplay policy, for instance) clears the flag, so that the
+    /// playback can be tried again later.
+    playing: Rc<Cell<bool>>,
     /// Whether the end of the stream was reached.
     ended: bool,
     /// Whether a seek is in progress.
@@ -170,7 +175,7 @@ impl WebVideoBackend {
             meta,
             last_time: 0.0,
             delivered: false,
-            playing: false,
+            playing: Rc::new(Cell::new(false)),
             ended: false,
             seeking,
             _seeked_handler: seeked_handler,
@@ -188,22 +193,29 @@ impl WebVideoBackend {
     /// The element is muted, so the browser is allowed to start it without
     /// a user gesture.
     fn start_playback(&mut self) {
-        if self.playing {
+        if self.playing.get() {
             return;
         }
-        self.playing = true;
+        self.playing.set(true);
 
+        let playing = Rc::clone(&self.playing);
         match self.video.play() {
             Ok(promise) => {
                 // The promise is rejected when the browser refuses to play
                 // the video (a broken file, a codec it does not know, …).
+                // The flag is cleared, so that the playback can be tried
+                // again later.
                 wasm_bindgen_futures::spawn_local(async move {
                     if let Err(error) = JsFuture::from(promise).await {
                         warn!("the browser refused to play the video: {error:?}");
+                        playing.set(false);
                     }
                 });
             }
-            Err(error) => warn!("cannot play the video: {error:?}"),
+            Err(error) => {
+                warn!("cannot play the video: {error:?}");
+                self.playing.set(false);
+            }
         }
     }
 
@@ -357,6 +369,10 @@ impl FrameDecoder for WebVideoBackend {
             self.seeking.set(true);
             self.video.set_current_time(0.0);
         }
+
+        // The element may have been paused (at the end of the stream, for
+        // instance): the playback has to start again.
+        self.start_playback();
 
         Ok(())
     }

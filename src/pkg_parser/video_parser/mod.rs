@@ -10,8 +10,9 @@
 //!   implement the [`FrameDecoder`] trait and are plugged into the core.
 //!
 //! The ffmpeg based decoder is only compiled when the `ffmpeg` cargo feature
-//! is enabled (it is on by default); it is the only place in the crate that
-//! is allowed to mention `ffmpeg_next`.
+//! is enabled (it is on by default) and only for the native targets: the
+//! native libraries cannot be cross compiled.  It is the only place in the
+//! crate that is allowed to mention `ffmpeg_next`.
 //!
 //! In a browser build the decoders are the ones of the browser itself:
 //! the [`WebVideoBackend`] drives the media element of the page (which
@@ -149,13 +150,12 @@ pub(crate) fn web_backend(
 /// targets the caller gets a [`VideoError::Unsupported`].
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn web_backend(
-    kind: BackendKind,
+    _kind: BackendKind,
     _bytes: &[u8],
 ) -> Result<Box<dyn FrameDecoder>, VideoError> {
-    Err(VideoError::Unsupported(format!(
-        "the `{}` backend is only available in a browser build",
-        kind.name()
-    )))
+    Err(VideoError::Unsupported(
+        "the browser backends are only available in a browser build".to_string(),
+    ))
 }
 
 /// Create the ffmpeg backend.
