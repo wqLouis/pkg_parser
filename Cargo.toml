@@ -14,7 +14,12 @@ default = ["ffmpeg"]
 ffmpeg = ["dep:ffmpeg-next"]
 
 [dependencies]
-ahash = "0.8.12"
+# `ahash` pulls in `getrandom` to seed itself from the operating system.  This
+# project does not need a random (let alone cryptographic) seed - the hash
+# tables index assets and shader symbols, they are not a security boundary -
+# and a fixed seed keeps the crate free of a native entropy source, which
+# also makes it build for `wasm32-unknown-unknown` (the browser target).
+ahash = { version = "0.8.12", default-features = false, features = ["std", "no-rng"] }
 bcndecode = "0.2.0"
 ffmpeg-next = { version = "9.0", optional = true }
 hashbrown = "0.15.5"
