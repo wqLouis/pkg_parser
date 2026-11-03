@@ -9,8 +9,12 @@ license = "GPL-3.0"
 default = ["ffmpeg"]
 # Enables the ffmpeg-backed video decoder.  Turning it off keeps the crate
 # free of any native dependency, which is what the browser (wasm) build
-# needs: there the GIF backend (pure Rust) and user supplied backends are
-# used instead.
+# needs: there the GIF backend (pure Rust), the still image backend (pure
+# Rust) and the backends of the browser itself are used instead.
+#
+# The dependency itself is only pulled in for the native targets: ffmpeg
+# cannot be cross compiled, so a browser build works with the default
+# features too.
 ffmpeg = ["dep:ffmpeg-next"]
 
 [dependencies]
@@ -21,13 +25,27 @@ ffmpeg = ["dep:ffmpeg-next"]
 # also makes it build for `wasm32-unknown-unknown` (the browser target).
 ahash = { version = "0.8.12", default-features = false, features = ["std", "no-rng"] }
 bcndecode = "0.2.0"
-ffmpeg-next = { version = "9.0", optional = true }
 hashbrown = "0.15.5"
 image = "0.25.9"
 log = "0.4"
 lz4_flex = "0.12.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
+
+# The ffmpeg backed decoder is only built for the native targets: the
+# native libraries cannot be cross compiled to `wasm32-unknown-unknown`,
+# where the browser does the decoding.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ffmpeg-next = { version = "9.0", optional = true }
+
+# The browser backends (the media element of the page and the WebCodecs
+# `ImageDecoder`) are only compiled for `wasm32-unknown-unknown`: they
+# are the only place in the crate that talks to the browser.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["Blob", "BlobPropertyBag", "Document", "Element", "HtmlMediaElement", "HtmlVideoElement", "ImageData", "OffscreenCanvas", "OffscreenCanvasRenderingContext2d", "PlaneLayout", "Url", "VideoFrame", "VideoFrameCopyToOptions", "VideoPixelFormat", "ImageDecoder", "ImageDecoderInit", "Window"] }
 
 [profile.release]
 debug = false

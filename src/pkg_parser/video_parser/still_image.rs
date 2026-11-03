@@ -41,6 +41,18 @@ impl ImageFormat {
             ImageFormat::Bmp => "bmp",
         }
     }
+
+    /// The mime type of the format, as the browser expects it.
+    ///
+    /// The browser needs it to pick the decoder of an encoded image.
+    pub fn mime_type(self) -> &'static str {
+        match self {
+            ImageFormat::Png => "image/png",
+            ImageFormat::Jpeg => "image/jpeg",
+            ImageFormat::WebP => "image/webp",
+            ImageFormat::Bmp => "image/bmp",
+        }
+    }
 }
 
 /// Detect the still image format from the magic bytes.

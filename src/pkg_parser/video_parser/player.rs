@@ -3,10 +3,6 @@
 //! The player owns a [`FrameDecoder`], maps a wall-clock time to a decoded
 //! frame and keeps a small cache of the most recently decoded frames so that
 //! the same frame can be served repeatedly without decoding it again.
-//!
-//! A decoder that is not ready yet — an asynchronous one — does not end the
-//! playback: the frame that is on screen stays there until the next frame is
-//! decoded.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -103,6 +99,7 @@ impl VideoPlayer {
                 }
                 Box::new(ImageBackend::new(Arc::from(bytes)))
             }
+            BackendKind::WebVideo | BackendKind::WebImage => super::web_backend(kind, bytes)?,
         };
 
         Self::open_with_backend(bytes, backend)
@@ -126,9 +123,7 @@ impl VideoPlayer {
     /// The frame that covers `time_secs` (seconds from the start of the stream).
     ///
     /// Sequential playback is O(1) amortised; a backwards jump rewinds and re-decodes.
-    /// Returns `Ok(None)` when there is nothing to show: the stream is exhausted
-    /// and nothing is cached, or the decoder is not ready yet and did not decode
-    /// a single frame yet.
+    /// Returns `Ok(None)` when the stream is exhausted and nothing is cached.
     pub fn frame_at(&mut self, time_secs: f64) -> Result<Option<VideoFrame>, VideoError> {
         let target = if time_secs.is_nan() {
             0.0
@@ -157,12 +152,9 @@ impl VideoPlayer {
                 FrameStatus::Frame(frame) => {
                     self.push(frame);
                 }
+                // The decoder is still working on the frame: there is
+                // nothing new to show yet.
                 FrameStatus::Pending => {
-                    // The decoder is not ready yet: an asynchronous decoder
-                    // cannot hand out a frame on demand.  Stop decoding, keep
-                    // the frames that were already decoded and show the one
-                    // that is currently on screen; the stream is not over.
-                    debug!("the `{}` backend is not ready yet", self.backend.name());
                     break;
                 }
                 FrameStatus::End => {

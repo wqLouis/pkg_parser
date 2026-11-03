@@ -91,7 +91,7 @@ fn the_image_backend_decodes_a_single_frame() {
 
     let frame = match backend.next_frame().unwrap() {
         FrameStatus::Frame(frame) => frame,
-        status => panic!("unexpected status: {status:?}"),
+        other => panic!("no frame: {other:?}"),
     };
     assert_eq!(frame.width, 4);
     assert_eq!(frame.height, 4);
@@ -104,7 +104,7 @@ fn the_image_backend_decodes_a_single_frame() {
     backend.rewind().expect("cannot rewind the backend");
     let replayed = match backend.next_frame().unwrap() {
         FrameStatus::Frame(frame) => frame,
-        status => panic!("unexpected status: {status:?}"),
+        other => panic!("no frame: {other:?}"),
     };
     assert_eq!(replayed.rgba, frame.rgba);
 }
@@ -118,7 +118,7 @@ fn the_image_backend_can_be_rescaled() {
 
     let frame = match backend.next_frame().unwrap() {
         FrameStatus::Frame(frame) => frame,
-        status => panic!("unexpected status: {status:?}"),
+        other => panic!("no frame: {other:?}"),
     };
     assert_eq!(frame.width, 8);
     assert_eq!(frame.height, 8);

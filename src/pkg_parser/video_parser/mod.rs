@@ -12,18 +12,30 @@
 //! The ffmpeg based decoder is only compiled when the `ffmpeg` cargo feature
 //! is enabled (it is on by default); it is the only place in the crate that
 //! is allowed to mention `ffmpeg_next`.
+//!
+//! In a browser build the decoders are the ones of the browser itself:
+//! the [`WebVideoBackend`] drives the media element of the page (which
+//! demuxes *and* decodes the file) and the [`WebImageBackend`] uses the
+//! WebCodecs `ImageDecoder`.  They are only compiled for
+//! `wasm32-unknown-unknown`.
 
 pub mod backend;
 pub mod info;
+pub mod mp4_meta;
 pub mod player;
 
-#[cfg(feature = "ffmpeg")]
+// The ffmpeg backend is only compiled for the native targets: the native
+// libraries cannot be cross compiled to `wasm32-unknown-unknown`, where
+// the browser decodes the videos itself.
+#[cfg(all(feature = "ffmpeg", not(target_arch = "wasm32")))]
 mod ffmpeg;
 mod gif;
 // The module is named `still_image` and not `image`: a module called
 // `image` would shadow the `image` crate inside this file, and every
 // `image::…` path would silently resolve to the module instead.
 mod still_image;
+#[cfg(target_arch = "wasm32")]
+mod web;
 
 use std::io::Cursor;
 use std::sync::Arc;
@@ -31,28 +43,34 @@ use std::sync::Arc;
 use image::{ImageBuffer, Rgba};
 
 pub use backend::{BackendKind, FrameDecoder, VideoBackend, detect_format};
-#[cfg(feature = "ffmpeg")]
+#[cfg(all(feature = "ffmpeg", not(target_arch = "wasm32")))]
 pub use ffmpeg::FfmpegBackend;
 pub use gif::GifBackend;
 pub use info::{FrameStatus, VideoError, VideoFormat, VideoFrame, VideoInfo};
+pub use mp4_meta::{Mp4Meta, probe_mp4};
 pub use player::VideoPlayer;
 pub use still_image::{ImageBackend, ImageFormat, detect_image_format};
+#[cfg(target_arch = "wasm32")]
+pub use web::{WebImageBackend, WebVideoBackend};
 
 /// Pick the backend that can decode `bytes`, based on the container/format.
 ///
 /// * an animated GIF is decoded by the pure Rust GIF backend,
 /// * a still image (png, jpeg, webp, bmp) by the pure Rust image backend,
-/// * an mp4/webm container by the ffmpeg backend.
+/// * an mp4/webm container by the ffmpeg backend — or, in a browser build,
+///   by the media element of the page.
 ///
-/// The mp4/webm containers need the `ffmpeg` cargo feature: without it the
-/// function reports a [`VideoError::Unsupported`].
+/// The mp4/webm containers need the `ffmpeg` cargo feature on the native
+/// targets: without it the function reports a [`VideoError::Unsupported`].
 pub fn backend_for(bytes: &[u8]) -> Result<Box<dyn FrameDecoder>, VideoError> {
     match detect_format(bytes) {
         Some(VideoFormat::Gif) => Ok(Box::new(GifBackend::new(Arc::from(bytes)))),
-        Some(VideoFormat::Mp4) | Some(VideoFormat::WebM) => ffmpeg_backend(Arc::from(bytes)),
-        Some(VideoFormat::Unknown(_)) => Err(VideoError::Unsupported(
-            "the container format is not supported".to_string(),
-        )),
+        Some(format) => match &format {
+            VideoFormat::Mp4 | VideoFormat::WebM => video_backend(bytes, mime_for(&format)),
+            _ => Err(VideoError::Unsupported(
+                "the container format is not supported".to_string(),
+            )),
+        },
         None => {
             if detect_image_format(bytes).is_some() {
                 Ok(Box::new(ImageBackend::new(Arc::from(bytes))))
@@ -65,11 +83,86 @@ pub fn backend_for(bytes: &[u8]) -> Result<Box<dyn FrameDecoder>, VideoError> {
     }
 }
 
+/// The mime type of a video container, as the browser expects it.
+fn mime_for(format: &VideoFormat) -> &'static str {
+    match format {
+        VideoFormat::Mp4 => "video/mp4",
+        VideoFormat::WebM => "video/webm",
+        _ => "application/octet-stream",
+    }
+}
+
+/// Create the backend that decodes an mp4/webm container.
+///
+/// In a browser the media element of the page does the work: it demuxes
+/// *and* decodes the file, which is exactly what the WebCodecs
+/// `VideoDecoder` cannot do (the codec API only decodes encoded chunks,
+/// it knows nothing about the containers).  On the native targets the
+/// ffmpeg backend is used instead.
+#[cfg(target_arch = "wasm32")]
+fn video_backend(bytes: &[u8], mime: &str) -> Result<Box<dyn FrameDecoder>, VideoError> {
+    Ok(Box::new(web::WebVideoBackend::new(Arc::from(bytes), mime)))
+}
+
+/// Create the backend that decodes an mp4/webm container.
+///
+/// On the native targets the ffmpeg backend is used; see the browser
+/// build for the other case.
+#[cfg(not(target_arch = "wasm32"))]
+fn video_backend(bytes: &[u8], _mime: &str) -> Result<Box<dyn FrameDecoder>, VideoError> {
+    ffmpeg_backend(Arc::from(bytes))
+}
+
+/// Create one of the browser backends.
+///
+/// The browser backends only exist in a browser build: on the other
+/// targets the caller gets a [`VideoError::Unsupported`].
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn web_backend(
+    kind: BackendKind,
+    bytes: &[u8],
+) -> Result<Box<dyn FrameDecoder>, VideoError> {
+    match kind {
+        BackendKind::WebVideo => {
+            let format = detect_format(bytes).unwrap_or(VideoFormat::Mp4);
+            Ok(Box::new(web::WebVideoBackend::new(
+                Arc::from(bytes),
+                mime_for(&format),
+            )))
+        }
+        BackendKind::WebImage => {
+            let format = detect_image_format(bytes).unwrap_or(ImageFormat::Png);
+            Ok(Box::new(web::WebImageBackend::new(
+                Arc::from(bytes),
+                format.mime_type(),
+            )))
+        }
+        _ => Err(VideoError::Unsupported(
+            "this is not a browser backend".to_string(),
+        )),
+    }
+}
+
+/// Create one of the browser backends.
+///
+/// The browser backends only exist in a browser build: on the other
+/// targets the caller gets a [`VideoError::Unsupported`].
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn web_backend(
+    kind: BackendKind,
+    _bytes: &[u8],
+) -> Result<Box<dyn FrameDecoder>, VideoError> {
+    Err(VideoError::Unsupported(format!(
+        "the `{}` backend is only available in a browser build",
+        kind.name()
+    )))
+}
+
 /// Create the ffmpeg backend.
 ///
 /// Without the `ffmpeg` cargo feature the crate has no native decoder at all,
 /// so the caller gets an [`VideoError::Unsupported`] instead.
-#[cfg(feature = "ffmpeg")]
+#[cfg(all(feature = "ffmpeg", not(target_arch = "wasm32")))]
 pub(crate) fn ffmpeg_backend(bytes: Arc<[u8]>) -> Result<Box<dyn FrameDecoder>, VideoError> {
     Ok(Box::new(ffmpeg::FfmpegBackend::new(bytes)))
 }
@@ -78,7 +171,7 @@ pub(crate) fn ffmpeg_backend(bytes: Arc<[u8]>) -> Result<Box<dyn FrameDecoder>, 
 ///
 /// Without the `ffmpeg` cargo feature the crate has no native decoder at all,
 /// so the caller gets an [`VideoError::Unsupported`] instead.
-#[cfg(not(feature = "ffmpeg"))]
+#[cfg(any(not(feature = "ffmpeg"), target_arch = "wasm32"))]
 pub(crate) fn ffmpeg_backend(_bytes: Arc<[u8]>) -> Result<Box<dyn FrameDecoder>, VideoError> {
     Err(VideoError::Unsupported(
         "this build of pkg_parser has no ffmpeg support; rebuild it with the `ffmpeg` feature"

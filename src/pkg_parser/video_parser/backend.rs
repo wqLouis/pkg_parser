@@ -5,10 +5,6 @@
 //! that any implementation — ffmpeg on native targets, a WebCodecs bridge in
 //! the browser — can satisfy it.  Random access is implemented by the player
 //! on top of it.
-//!
-//! A decoder that cannot hand out a frame on demand — the browser's
-//! WebCodecs, the HTML media element — reports [`FrameStatus::Pending`]
-//! instead of blocking: the caller asks again later.
 
 use crate::pkg_parser::video_parser::info::{FrameStatus, VideoError, VideoFormat, VideoInfo};
 
@@ -22,9 +18,6 @@ use crate::pkg_parser::video_parser::info::{FrameStatus, VideoError, VideoFormat
 /// The trait is intentionally *sequential* (decode the next frame / rewind) so that any
 /// implementation — ffmpeg on native targets, a WebCodecs bridge in the browser — can
 /// satisfy it. Random access is implemented by the player on top of it.
-///
-/// An asynchronous decoder — one that cannot produce a frame on demand —
-/// answers [`FrameStatus::Pending`] and is asked again later.
 pub trait FrameDecoder {
     /// Short, stable identifier of the backend (e.g. `"ffmpeg"`, `"gif"`, `"image"`).
     fn name(&self) -> &'static str;
@@ -34,8 +27,10 @@ pub trait FrameDecoder {
 
     /// Decode the next frame in presentation order.
     ///
-    /// Returns `FrameStatus::Pending` when an asynchronous decoder is not
-    /// ready yet, and `FrameStatus::End` at the end of the stream.
+    /// The decoder is allowed to work asynchronously: a backend that is
+    /// still busy returns [`FrameStatus::Pending`] and the caller has to
+    /// ask again later.  [`FrameStatus::End`] means that the stream is
+    /// over.
     fn next_frame(&mut self) -> Result<FrameStatus, VideoError>;
 
     /// Restart decoding from the beginning of the stream.
@@ -64,6 +59,28 @@ pub enum BackendKind {
     Gif,
     /// Force the pure Rust still image backend (png, jpeg, webp, …).
     Image,
+    /// Force the browser video backend (the media element of the page).
+    ///
+    /// The backend only exists in a browser build.
+    WebVideo,
+    /// Force the browser image backend (the WebCodecs `ImageDecoder`).
+    ///
+    /// The backend only exists in a browser build.
+    WebImage,
+}
+
+impl BackendKind {
+    /// A short, stable name of the backend kind (e.g. `"ffmpeg"`, `"web-video"`).
+    pub fn name(self) -> &'static str {
+        match self {
+            BackendKind::Auto => "auto",
+            BackendKind::Ffmpeg => "ffmpeg",
+            BackendKind::Gif => "gif",
+            BackendKind::Image => "image",
+            BackendKind::WebVideo => "web-video",
+            BackendKind::WebImage => "web-image",
+        }
+    }
 }
 
 /// Detect the container format from the magic bytes.

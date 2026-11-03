@@ -62,16 +62,19 @@ pub struct VideoFrame {
     pub rgba: Arc<[u8]>,
 }
 
-/// The outcome of asking a decoder for the next frame.
-#[derive(Debug)]
+/// The outcome of a call to
+/// [`FrameDecoder::next_frame`](crate::pkg_parser::video_parser::backend::FrameDecoder::next_frame).
+///
+/// A decoder is not necessarily synchronous: the browser decodes a video
+/// in the media element of the page and an image with the WebCodecs
+/// `ImageDecoder`, and both of them hand the frame over asynchronously.
+/// `Pending` tells the caller that the decoder is still working on the
+/// frame and that it should ask again later.
+#[derive(Debug, Clone)]
 pub enum FrameStatus {
     /// A frame was decoded and is ready to be shown.
     Frame(VideoFrame),
     /// The decoder is still working on it: the frame is not ready yet.
-    ///
-    /// Asynchronous decoders — the browser's WebCodecs, the HTML media
-    /// element — cannot produce a frame on demand. They report "not yet" and
-    /// the caller asks again later. Synchronous decoders never return this.
     Pending,
     /// The end of the stream was reached.
     End,
