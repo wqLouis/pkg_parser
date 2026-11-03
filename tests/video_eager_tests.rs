@@ -10,8 +10,8 @@
 use image::codecs::gif::GifEncoder;
 use image::{Delay, Frame, RgbaImage};
 use pkg_parser::pkg_parser::video_parser::{
-    DEFAULT_MEMORY_BUDGET, decode_all_with_budget, memory_budget, reset_memory_budget,
-    set_memory_budget,
+    DEFAULT_MEMORY_BUDGET, VideoInfo, decode_all_with_budget, estimate_decoded_size, memory_budget,
+    reset_memory_budget, set_memory_budget,
 };
 
 /// Build a 3 frame GIF (4x4 pixels, 100 ms per frame) in memory.
@@ -61,23 +61,26 @@ fn the_whole_clip_is_decoded_at_once() {
         );
     }
 
-    // The frames are tightly packed RGBA8 frames.
+    // The frames are the YUV planes of the decoder: they are 2.7 times
+    // smaller than the RGBA frames.
     for frame in &clip.frames {
         assert_eq!(frame.width, 32);
         assert_eq!(frame.height, 32);
-        assert_eq!(frame.rgba.len(), 32 * 32 * 4);
+        assert!(frame.is_yuv420(), "the frames must hold YUV planes");
+        assert_eq!(frame.pixel_bytes(), 32 * 32 * 3 / 2);
+        assert_eq!(frame.rgba().expect("no pixels").len(), 32 * 32 * 4);
     }
 
     // The pixels are the ones of the test pattern: the corner of the
     // frame is black and the frame holds the yellow block of the
     // pattern.
-    let corner = &clip.frames[0].rgba[0..4];
+    let first = clip.frames[0].rgba().expect("no pixels");
+    let corner = &first[0..4];
     assert!(
         corner[0] < 16 && corner[1] < 16 && corner[2] < 16,
         "the corner of the frame must be black: {corner:?}"
     );
-    let yellow = clip.frames[0]
-        .rgba
+    let yellow = first
         .as_chunks::<4>()
         .0
         .iter()
@@ -89,7 +92,8 @@ fn the_whole_clip_is_decoded_at_once() {
 
     // The test pattern changes from one frame to the next.
     assert_ne!(
-        clip.frames[2].rgba, clip.frames[3].rgba,
+        clip.frames[2].rgba().expect("no pixels"),
+        clip.frames[3].rgba().expect("no pixels"),
         "the test pattern changes from one frame to the next"
     );
 
@@ -97,7 +101,10 @@ fn the_whole_clip_is_decoded_at_once() {
     // out: the decoding itself did not change.
     let mut player = VideoPlayer::open(bytes).expect("cannot open the sample video");
     let streamed = player.frame_at(0.0).unwrap().expect("no frame");
-    assert_eq!(streamed.rgba, clip.frames[0].rgba);
+    assert_eq!(
+        streamed.rgba().expect("no pixels"),
+        clip.frames[0].rgba().expect("no pixels")
+    );
     assert!(
         (streamed.time - clip.frames[0].time).abs() < 1e-9,
         "the times of the frames must be the same"
@@ -114,7 +121,8 @@ fn a_clip_that_does_not_fit_into_the_budget_is_refused() {
 
     let bytes = include_bytes!("data/sample.mp4");
 
-    // The budget is way too small for the clip (32 * 32 * 4 * 4 bytes).
+    // The budget is way too small for the clip (32 * 32 * 3 / 2 * 4 bytes
+    // for the YUV planes of the frames).
     let error =
         decode_all_with_budget(bytes, 1024).expect_err("the clip must not be decoded eagerly");
     assert!(
@@ -140,7 +148,7 @@ fn a_gif_is_decoded_in_one_go() {
     assert_eq!(clip.info.height, 4);
 
     for (index, frame) in clip.frames.iter().enumerate() {
-        assert_eq!(frame.rgba.len(), 4 * 4 * 4);
+        assert_eq!(frame.rgba().expect("no pixels").len(), 4 * 4 * 4);
         let expected = (index as f64) * 0.1;
         assert!(
             (frame.time - expected).abs() < 1e-6,
@@ -160,4 +168,25 @@ fn the_budget_of_the_eager_decoding_can_be_changed() {
 
     reset_memory_budget();
     assert_eq!(memory_budget(), default);
+}
+
+/// The budget counts the YUV frames at 1.5 bytes per pixel.
+///
+/// A YUV frame is 2.7 times smaller than an RGBA one: the estimate has to
+/// know it, or the eager decoding would be refused far too early.
+#[test]
+fn the_budget_counts_the_yuv_frames() {
+    let mut info = VideoInfo {
+        width: 1920,
+        height: 1080,
+        frame_count: 30,
+        pixel_format: "yuv420p".to_string(),
+        ..Default::default()
+    };
+
+    assert_eq!(estimate_decoded_size(&info), 1920 * 1080 * 3 / 2 * 30);
+
+    // The RGBA frames are four times the size of the pixels.
+    info.pixel_format = "rgba8".to_string();
+    assert_eq!(estimate_decoded_size(&info), 1920 * 1080 * 4 * 30);
 }

@@ -25,6 +25,7 @@ pub mod bulk;
 pub mod info;
 pub mod mp4_meta;
 pub mod player;
+pub mod yuv;
 
 // The ffmpeg backend is only compiled for the native targets: the native
 // libraries cannot be cross compiled to `wasm32-unknown-unknown`, where
@@ -53,7 +54,10 @@ pub use bulk::{
 #[cfg(all(feature = "ffmpeg", not(target_arch = "wasm32")))]
 pub use ffmpeg::FfmpegBackend;
 pub use gif::GifBackend;
-pub use info::{FrameStatus, VideoError, VideoFormat, VideoFrame, VideoInfo};
+pub use info::{
+    FramePixels, FrameStatus, VideoError, VideoFormat, VideoFrame, VideoInfo, YuvCoefficients,
+    YuvColorspace, YuvMatrix, YuvRange,
+};
 pub use mp4_meta::{Mp4Meta, probe_mp4};
 pub use player::VideoPlayer;
 pub use still_image::{ImageBackend, ImageFormat, detect_image_format};

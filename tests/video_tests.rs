@@ -15,8 +15,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use image::codecs::gif::GifEncoder;
 use image::{Delay, Frame, RgbaImage};
 use pkg_parser::pkg_parser::video_parser::{
-    BackendKind, FrameDecoder, FrameStatus, Video, VideoError, VideoFormat, VideoFrame, VideoInfo,
-    VideoPlayer, detect_format,
+    BackendKind, FrameDecoder, FramePixels, FrameStatus, Video, VideoError, VideoFormat,
+    VideoFrame, VideoInfo, VideoPlayer, detect_format,
 };
 
 /// A backend producing three synthetic 2x2 frames at t = 0.0 / 0.5 / 1.0.
@@ -43,7 +43,7 @@ impl MockBackend {
                 height: 2,
                 time: index as f64 * 0.5,
                 duration: 0.5,
-                rgba: Arc::from(vec![value; 2 * 2 * 4]),
+                pixels: FramePixels::Rgba(Arc::from(vec![value; 2 * 2 * 4])),
             })
             .collect();
 
@@ -122,7 +122,7 @@ impl PendingBackend {
                 height: 2,
                 time: index as f64 * 0.5,
                 duration: 0.5,
-                rgba: Arc::from(vec![value; 2 * 2 * 4]),
+                pixels: FramePixels::Rgba(Arc::from(vec![value; 2 * 2 * 4])),
             })
             .collect();
 
@@ -235,12 +235,12 @@ fn the_player_works_with_any_backend() {
 
     // The frame covering a time is the last one before it.
     let first = player.frame_at(0.0).unwrap().expect("no frame");
-    assert_eq!(first.rgba[0], 0);
+    assert_eq!(first.rgba().expect("no pixels")[0], 0);
 
     // The same frame is served from the cache: nothing is decoded again.
     let decoded_frames = decoded.load(Ordering::Relaxed);
     let cached = player.frame_at(0.0).unwrap().expect("no frame");
-    assert_eq!(cached.rgba[0], 0);
+    assert_eq!(cached.rgba().expect("no pixels")[0], 0);
     assert_eq!(
         decoded.load(Ordering::Relaxed),
         decoded_frames,
@@ -248,14 +248,14 @@ fn the_player_works_with_any_backend() {
     );
 
     let second = player.frame_at(0.6).unwrap().expect("no frame");
-    assert_eq!(second.rgba[0], 1);
+    assert_eq!(second.rgba().expect("no pixels")[0], 1);
 
     let third = player.frame_at(1.2).unwrap().expect("no frame");
-    assert_eq!(third.rgba[0], 2);
+    assert_eq!(third.rgba().expect("no pixels")[0], 2);
 
     // A backwards jump rewinds the backend and starts from the first frame.
     let again = player.frame_at(0.1).unwrap().expect("no frame");
-    assert_eq!(again.rgba[0], 0);
+    assert_eq!(again.rgba().expect("no pixels")[0], 0);
 }
 
 /// An asynchronous decoder that is not ready yet does not stop the playback.
@@ -277,11 +277,15 @@ fn a_pending_backend_keeps_the_frame_that_is_on_screen() {
     // The third call gets the first frame; the decoder is pending again for
     // the next one, so the frame that is on screen is served.
     let first = player.frame_at(0.0).unwrap().expect("no frame");
-    assert_eq!(first.rgba[0], 0);
+    assert_eq!(first.rgba().expect("no pixels")[0], 0);
 
     // While the decoder is pending, the frame that is on screen stays there.
     let pending = player.frame_at(0.6).unwrap().expect("no frame");
-    assert_eq!(pending.rgba[0], 0, "the cached frame must stay on screen");
+    assert_eq!(
+        pending.rgba().expect("no pixels")[0],
+        0,
+        "the cached frame must stay on screen"
+    );
     assert!(
         pendings.load(Ordering::Relaxed) > 0,
         "the backend must have been asked for a frame"
@@ -289,14 +293,18 @@ fn a_pending_backend_keeps_the_frame_that_is_on_screen() {
 
     // The next frame is served as soon as it is ready.
     let second = player.frame_at(0.6).unwrap().expect("no frame");
-    assert_eq!(second.rgba[0], 1);
+    assert_eq!(second.rgba().expect("no pixels")[0], 1);
 
     // The stream was not considered finished while the decoder was pending:
     // the last frame is decoded and served.
     let third = player.frame_at(1.2).unwrap().expect("no frame");
-    assert_eq!(third.rgba[0], 1, "the decoder is still pending");
+    assert_eq!(
+        third.rgba().expect("no pixels")[0],
+        1,
+        "the decoder is still pending"
+    );
     let last = player.frame_at(1.2).unwrap().expect("no frame");
-    assert_eq!(last.rgba[0], 2);
+    assert_eq!(last.rgba().expect("no pixels")[0], 2);
 }
 
 /// The GIF backend decodes every frame of the animation.
@@ -322,7 +330,7 @@ fn the_gif_backend_decodes_every_frame() {
             .expect("no frame");
         assert_eq!(frame.width, 4);
         assert_eq!(frame.height, 4);
-        assert_eq!(frame.rgba.len(), 4 * 4 * 4);
+        assert_eq!(frame.rgba().expect("no pixels").len(), 4 * 4 * 4);
         times.push(frame.time);
     }
 
@@ -394,7 +402,7 @@ fn the_ffmpeg_backend_decodes_the_sample() {
     let first = player.frame_at(0.0).unwrap().expect("no frame");
     assert_eq!(first.width, 32);
     assert_eq!(first.height, 32);
-    assert_eq!(first.rgba.len(), 32 * 32 * 4);
+    assert_eq!(first.rgba().expect("no pixels").len(), 32 * 32 * 4);
     assert!(
         (first.time - 0.0).abs() < 1e-3,
         "unexpected time {}",
@@ -402,7 +410,7 @@ fn the_ffmpeg_backend_decodes_the_sample() {
     );
 
     let second = player.frame_at(0.1).unwrap().expect("no frame");
-    assert_eq!(second.rgba.len(), 32 * 32 * 4);
+    assert_eq!(second.rgba().expect("no pixels").len(), 32 * 32 * 4);
     assert!(
         (second.time - 0.1).abs() < 1e-3,
         "unexpected time {}",
@@ -410,7 +418,7 @@ fn the_ffmpeg_backend_decodes_the_sample() {
     );
 
     let third = player.frame_at(0.2).unwrap().expect("no frame");
-    assert_eq!(third.rgba.len(), 32 * 32 * 4);
+    assert_eq!(third.rgba().expect("no pixels").len(), 32 * 32 * 4);
     assert!(
         (third.time - 0.2).abs() < 1e-3,
         "unexpected time {}",
@@ -420,16 +428,20 @@ fn the_ffmpeg_backend_decodes_the_sample() {
     // The test pattern changes from one frame to the next (the first two
     // frames of the `testsrc` pattern happen to be identical).
     let fourth = player.frame_at(0.3).unwrap().expect("no frame");
-    assert_eq!(fourth.rgba.len(), 32 * 32 * 4);
+    assert_eq!(fourth.rgba().expect("no pixels").len(), 32 * 32 * 4);
     assert_ne!(
-        third.rgba, fourth.rgba,
+        third.rgba().expect("no pixels"),
+        fourth.rgba().expect("no pixels"),
         "the test pattern changes from one frame to the next"
     );
 
     // The video can be replayed: after a reset the first frame comes back.
     player.reset().expect("cannot reset the player");
     let replayed = player.frame_at(0.0).unwrap().expect("no frame");
-    assert_eq!(replayed.rgba, first.rgba);
+    assert_eq!(
+        replayed.rgba().expect("no pixels"),
+        first.rgba().expect("no pixels")
+    );
 
     // A time past the end of the stream still yields the last frame.
     player.reset().expect("cannot reset the player");
@@ -438,5 +450,5 @@ fn the_ffmpeg_backend_decodes_the_sample() {
         .unwrap()
         .expect("no frame");
     assert_eq!(past_the_end.width, 32);
-    assert_eq!(past_the_end.rgba.len(), 32 * 32 * 4);
+    assert_eq!(past_the_end.rgba().expect("no pixels").len(), 32 * 32 * 4);
 }

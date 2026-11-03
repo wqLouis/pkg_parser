@@ -269,8 +269,11 @@ fn write_metadata(stem: &str, output_path: &Path, metadata: &VideoMetadata, dry_
 
 /// Write a decoded frame as a PNG file.
 fn write_frame(path: &Path, frame: &VideoFrame) -> Result<(), String> {
+    // The frames of a video are YUV planes: they are converted into RGBA
+    // on the CPU, which is what the PNG export needs.
+    let pixels = frame.rgba().map_err(|error| error.to_string())?;
     let image =
-        RgbaImage::from_raw(frame.width, frame.height, frame.rgba.to_vec()).ok_or_else(|| {
+        RgbaImage::from_raw(frame.width, frame.height, pixels.to_vec()).ok_or_else(|| {
             format!(
                 "the {}x{} frame does not hold the expected number of pixels",
                 frame.width, frame.height

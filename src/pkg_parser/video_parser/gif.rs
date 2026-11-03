@@ -12,7 +12,9 @@ use image::{AnimationDecoder, ImageDecoder, RgbaImage, codecs::gif::GifDecoder};
 use log::debug;
 
 use crate::pkg_parser::video_parser::backend::FrameDecoder;
-use crate::pkg_parser::video_parser::info::{FrameStatus, VideoError, VideoFrame, VideoInfo};
+use crate::pkg_parser::video_parser::info::{
+    FramePixels, FrameStatus, VideoError, VideoFrame, VideoInfo,
+};
 
 /// Pure-Rust GIF backend built on the `image` crate (no ffmpeg, wasm-friendly).
 ///
@@ -116,7 +118,7 @@ impl FrameDecoder for GifBackend {
             height,
             time,
             duration: delay,
-            rgba: Arc::from(buffer.into_raw()),
+            pixels: FramePixels::Rgba(Arc::from(buffer.into_raw())),
         }))
     }
 

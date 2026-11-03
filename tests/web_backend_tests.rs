@@ -49,7 +49,7 @@ fn the_browser_decodes_the_video() {
         FrameStatus::Frame(frame) => {
             assert_eq!(frame.width, 32);
             assert_eq!(frame.height, 32);
-            assert_eq!(frame.rgba.len(), 32 * 32 * 4);
+            assert_eq!(frame.rgba().expect("no pixels").len(), 32 * 32 * 4);
         }
         FrameStatus::End => panic!("the video is over already"),
     }

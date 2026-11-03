@@ -52,7 +52,9 @@ use web_sys::{
 use web_sys::VideoFrame as WebVideoFrame;
 
 use crate::pkg_parser::video_parser::backend::FrameDecoder;
-use crate::pkg_parser::video_parser::info::{FrameStatus, VideoError, VideoFrame, VideoInfo};
+use crate::pkg_parser::video_parser::info::{
+    FramePixels, FrameStatus, VideoError, VideoFrame, VideoInfo,
+};
 use crate::pkg_parser::video_parser::mp4_meta::{Mp4Meta, probe_mp4};
 
 /// The `readyState` of a media element that has a frame to show.
@@ -272,7 +274,7 @@ impl WebVideoBackend {
             // The duration of a frame is not known: the media element
             // does not tell how long the current frame stays on screen.
             duration: 0.0,
-            rgba: Arc::from(image.data().to_vec()),
+            pixels: FramePixels::Rgba(Arc::from(image.data().to_vec())),
         })
     }
 }
@@ -525,7 +527,7 @@ impl FrameDecoder for WebImageBackend {
                             height: image.height,
                             time: 0.0,
                             duration: 0.0,
-                            rgba: image.rgba.clone(),
+                            pixels: FramePixels::Rgba(image.rgba.clone()),
                         })
                     }
                 }

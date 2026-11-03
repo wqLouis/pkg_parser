@@ -12,8 +12,8 @@ use std::sync::Arc;
 use image::codecs::gif::GifEncoder;
 use image::{Delay, Frame, RgbaImage};
 use pkg_parser::pkg_parser::video_parser::{
-    BackendKind, FrameDecoder, FrameStatus, ImageBackend, ImageFormat, VideoBackend, VideoError,
-    VideoFrame, VideoInfo, VideoPlayer, backend_for, detect_image_format,
+    BackendKind, FrameDecoder, FramePixels, FrameStatus, ImageBackend, ImageFormat, VideoBackend,
+    VideoError, VideoFrame, VideoInfo, VideoPlayer, backend_for, detect_image_format,
 };
 
 /// Build a 4x4 png in memory.
@@ -64,16 +64,22 @@ fn a_still_image_is_a_stream_with_one_frame() {
     let frame = player.frame_at(0.0).unwrap().expect("no frame");
     assert_eq!(frame.width, 4);
     assert_eq!(frame.height, 4);
-    assert_eq!(frame.rgba.len(), 4 * 4 * 4);
+    assert_eq!(frame.rgba().expect("no pixels").len(), 4 * 4 * 4);
 
     // A still image never ends: the same frame is served for any time.
     let later = player.frame_at(5.0).unwrap().expect("no frame");
-    assert_eq!(later.rgba, frame.rgba);
+    assert_eq!(
+        later.rgba().expect("no pixels"),
+        frame.rgba().expect("no pixels")
+    );
 
     // After a reset the frame is available again.
     player.reset().expect("cannot reset the player");
     let replayed = player.frame_at(0.0).unwrap().expect("no frame");
-    assert_eq!(replayed.rgba, frame.rgba);
+    assert_eq!(
+        replayed.rgba().expect("no pixels"),
+        frame.rgba().expect("no pixels")
+    );
 }
 
 /// The image backend can also be used on its own.
@@ -95,7 +101,7 @@ fn the_image_backend_decodes_a_single_frame() {
     };
     assert_eq!(frame.width, 4);
     assert_eq!(frame.height, 4);
-    assert_eq!(frame.rgba.len(), 4 * 4 * 4);
+    assert_eq!(frame.rgba().expect("no pixels").len(), 4 * 4 * 4);
 
     // The single frame was handed out: the stream is over.
     assert!(matches!(backend.next_frame().unwrap(), FrameStatus::End));
@@ -106,7 +112,10 @@ fn the_image_backend_decodes_a_single_frame() {
         FrameStatus::Frame(frame) => frame,
         other => panic!("no frame: {other:?}"),
     };
-    assert_eq!(replayed.rgba, frame.rgba);
+    assert_eq!(
+        replayed.rgba().expect("no pixels"),
+        frame.rgba().expect("no pixels")
+    );
 }
 
 /// The frame can be delivered at another resolution.
@@ -122,7 +131,7 @@ fn the_image_backend_can_be_rescaled() {
     };
     assert_eq!(frame.width, 8);
     assert_eq!(frame.height, 8);
-    assert_eq!(frame.rgba.len(), 8 * 8 * 4);
+    assert_eq!(frame.rgba().expect("no pixels").len(), 8 * 8 * 4);
 }
 
 /// The image formats are detected from the magic bytes.
@@ -219,7 +228,7 @@ impl VideoBackend for AliasBackend {
             height: 1,
             time: 0.0,
             duration: 0.0,
-            rgba: Arc::from(vec![0u8; 4]),
+            pixels: FramePixels::Rgba(Arc::from(vec![0u8; 4])),
         }))
     }
 
@@ -238,5 +247,5 @@ fn the_old_trait_name_still_works() {
     assert_eq!(player.backend_name(), "alias");
 
     let frame = player.frame_at(0.0).unwrap().expect("no frame");
-    assert_eq!(frame.rgba.len(), 4);
+    assert_eq!(frame.rgba().expect("no pixels").len(), 4);
 }

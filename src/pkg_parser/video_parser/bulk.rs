@@ -11,11 +11,13 @@
 //! # Memory budget
 //!
 //! Decoding a clip in one go costs memory: every frame is a
-//! `width * height * 4` byte buffer.  A *memory budget* guards the eager
-//! decoding: the size of the clip is estimated (`width * height * 4 *
-//! frame_count`) **before** it is decoded and the decoding is refused when
-//! the clip does not fit into the budget.  The caller then falls back to
-//! the streaming playback of the
+//! `width * height * 4` byte buffer (a YUV frame is 2.7 times smaller).
+//! A *memory budget* guards the eager decoding: the size of the clip is
+//! estimated (`width * height * 4 * frame_count`, or
+//! `width * height * 3 / 2 * frame_count` for the YUV frames) **before**
+//! it is decoded and the decoding is refused when the clip does not fit
+//! into the budget.  The caller then falls back to the streaming playback
+//! of the
 //! [`VideoPlayer`](crate::pkg_parser::video_parser::player::VideoPlayer).
 //!
 //! The trade-off is deliberate: a clip is decoded **once** and kept in
@@ -38,10 +40,11 @@ use crate::pkg_parser::video_parser::info::{FrameStatus, VideoError, VideoFrame,
 /// The default budget for the memory used by an eagerly decoded clip.
 ///
 /// 256 MiB holds the clips a wallpaper usually plays: a 1080p frame is
-/// 8.3 MiB, so the budget covers ~32 of them (about a second at 30 fps,
-/// more than three seconds at 10 fps), and a 720p clip of a few seconds.
-/// The clip is decoded once and kept in memory while it plays: the budget
-/// is what caps that memory.
+/// 3.1 MiB (the YUV planes of the decoder) or 8.3 MiB (the RGBA pixels
+/// of a converted frame), so the budget covers ~80 of them (about two
+/// seconds at 30 fps, more than eight seconds at 10 fps), and a 720p clip
+/// of a few seconds.  The clip is decoded once and kept in memory while
+/// it plays: the budget is what caps that memory.
 pub const DEFAULT_MEMORY_BUDGET: usize = 256 * 1024 * 1024;
 
 /// The name of the environment variable that overrides the default budget.
@@ -132,16 +135,30 @@ fn budget_from_env() -> Option<usize> {
 
 /// The estimated size of the frames of a clip, in bytes.
 ///
-/// The estimate is the size of one tightly packed RGBA8 frame times the
-/// number of the frames of the clip: `width * height * 4 * frame_count`.
+/// The estimate is the size of one frame times the number of the frames of
+/// the clip.  A YUV 4:2:0 frame holds 1.5 bytes per pixel (the luma
+/// plane and the two half sized chroma planes), an RGBA frame 4.
 ///
 /// A clip whose frame count is unknown has an estimate of zero: the
 /// budget is then checked while the clip is decoded.
 pub fn estimate_decoded_size(info: &VideoInfo) -> usize {
-    let frame_size = (info.width as usize)
-        .saturating_mul(info.height as usize)
-        .saturating_mul(4);
-    frame_size.saturating_mul(info.frame_count as usize)
+    frame_size(info).saturating_mul(info.frame_count as usize)
+}
+
+/// The size of one frame of a clip, in bytes.
+///
+/// The YUV frames are 2.7 times smaller than the RGBA ones: the budget
+/// has to know it, otherwise the eager decoding would be refused far too
+/// early.
+fn frame_size(info: &VideoInfo) -> usize {
+    let pixels = (info.width as usize).saturating_mul(info.height as usize);
+    if info.is_yuv420() {
+        // The luma plane and the two chroma planes, which are half the
+        // width and half the height of the frame.
+        pixels.saturating_mul(3) / 2
+    } else {
+        pixels.saturating_mul(4)
+    }
 }
 
 /// Decode a whole clip into memory.
@@ -191,7 +208,7 @@ pub fn decode_all_with_backend(
     loop {
         match backend.next_frame()? {
             FrameStatus::Frame(frame) => {
-                decoded_size = decoded_size.saturating_add(frame.rgba.len());
+                decoded_size = decoded_size.saturating_add(frame.pixel_bytes());
                 // The estimate was only an estimate (the frame count of a
                 // clip is not always known): the clip is stopped when it
                 // turns out to be bigger than the budget.

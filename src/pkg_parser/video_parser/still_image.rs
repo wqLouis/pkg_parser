@@ -16,7 +16,9 @@ use image::imageops::FilterType;
 use log::debug;
 
 use crate::pkg_parser::video_parser::backend::FrameDecoder;
-use crate::pkg_parser::video_parser::info::{FrameStatus, VideoError, VideoFrame, VideoInfo};
+use crate::pkg_parser::video_parser::info::{
+    FramePixels, FrameStatus, VideoError, VideoFrame, VideoInfo,
+};
 
 /// The still image formats the backend recognises.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -204,7 +206,7 @@ impl FrameDecoder for ImageBackend {
             height: out_height,
             time: 0.0,
             duration: 0.0,
-            rgba,
+            pixels: FramePixels::Rgba(rgba),
         }))
     }
 

@@ -18,8 +18,10 @@ use log::{debug, warn};
 
 use crate::pkg_parser::video_parser::backend::{FrameDecoder, detect_format};
 use crate::pkg_parser::video_parser::info::{
-    FrameStatus, VideoError, VideoFormat, VideoFrame, VideoInfo,
+    FramePixels, FrameStatus, VideoError, VideoFormat, VideoFrame, VideoInfo, YuvColorspace,
+    YuvMatrix, YuvRange,
 };
+use crate::pkg_parser::video_parser::yuv::plane_from_rows;
 
 /// How many packets are pulled from the demuxer at once.
 ///
@@ -189,6 +191,15 @@ impl FfmpegBackend {
         }
 
         self.frame_buf = Some(Frame::new(self.src_format, src_width, src_height));
+
+        if self.hands_out_yuv() {
+            // The planes of the decoded frame are copied out of it: no
+            // conversion is needed and the scaler stays unused.
+            self.scaler = None;
+            self.out_buf = None;
+            return Ok(());
+        }
+
         self.out_buf = Some(Frame::new(
             ffmpeg::format::Pixel::RGBA,
             out_width,
@@ -207,6 +218,20 @@ impl FfmpegBackend {
             .map_err(|error| decode_error(format!("cannot create the scaler: {error:?}")))?,
         );
         Ok(())
+    }
+
+    /// Whether the frames of the stream are handed out as planar YUV.
+    ///
+    /// The decoder produces those planes natively, so they are copied out
+    /// of the decoded frame instead of being converted into RGBA on the
+    /// CPU.  The conversion is left to the consumer, which usually hands
+    /// the planes over to the GPU.
+    ///
+    /// The YUV path is only used when the frames are handed out at their
+    /// native resolution: a scaled frame would have to be converted (and
+    /// scaled) on the CPU anyway.
+    fn hands_out_yuv(&self) -> bool {
+        is_yuv420(self.src_format) && self.out_size == self.src_size
     }
 
     /// Read a batch of packets of the video stream out of the demuxer.
@@ -231,10 +256,18 @@ impl FfmpegBackend {
         Ok(batch)
     }
 
-    /// Pull one decoded frame out of the decoder and convert it to RGBA.
+    /// Pull one decoded frame out of the decoder.
+    ///
+    /// The frame is handed out in the format the decoder produced it in:
+    /// the planes of a YUV frame are copied out of it, everything else is
+    /// converted into RGBA.
     ///
     /// Returns `Ok(None)` when the decoder needs more packets.
     fn receive_frame(&mut self) -> Result<Option<VideoFrame>, VideoError> {
+        // Whether the frames are handed out as YUV is decided before the
+        // frame buffer is borrowed.
+        let hands_out_yuv = self.hands_out_yuv();
+
         let Some(decoder) = self.decoder.as_mut() else {
             return Err(decode_error("the decoder is not open"));
         };
@@ -269,44 +302,60 @@ impl FfmpegBackend {
         };
         let duration = if self.fps > 0.0 { 1.0 / self.fps } else { 0.0 };
 
-        // Convert the frame to tightly packed RGBA8.
-        let (out_width, out_height) = self.out_size;
-        let Some(scaler) = self.scaler.as_mut() else {
-            return Err(decode_error("the scaler is not available"));
-        };
-        let Some(output) = self.out_buf.as_mut() else {
-            return Err(decode_error("the output buffer is not allocated"));
-        };
-        scaler
-            .run(buffer, output)
-            .map_err(|error| decode_error(format!("cannot scale the frame: {error:?}")))?;
-
-        let stride = output.stride(0);
-        let row_bytes = out_width as usize * 4;
-        let pixels = output.data(0);
-        let size = row_bytes * out_height as usize;
-
-        // The pixels are copied into the `Arc` directly: the frame is not
-        // copied twice (into a `Vec` and then into the `Arc`).
-        let rgba = if stride == row_bytes {
-            // The rows are packed: the whole plane is copied at once.
-            Arc::<[u8]>::from(&pixels[..size])
-        } else {
-            // The rows are padded: they are copied one by one into a
-            // buffer that is then shared.
-            let mut buffer = Vec::with_capacity(size);
-            for row in pixels.chunks(stride) {
-                buffer.extend_from_slice(&row[..row_bytes]);
+        // The decoded frame is handed out in its native format: the planes
+        // of a YUV frame are copied out of it (no conversion on the CPU),
+        // everything else is converted into RGBA the way it always was.
+        let (width, height) = (buffer.width(), buffer.height());
+        let pixels = if hands_out_yuv && is_yuv420(buffer.format()) {
+            let colorspace = detect_colorspace(buffer);
+            let planes = extract_planes(buffer)?;
+            FramePixels::Yuv420 {
+                y: planes.luma,
+                u: planes.blue,
+                v: planes.red,
+                colorspace,
             }
-            Arc::<[u8]>::from(buffer)
+        } else {
+            let (out_width, out_height) = self.out_size;
+            let Some(scaler) = self.scaler.as_mut() else {
+                return Err(decode_error("the scaler is not available"));
+            };
+            let Some(output) = self.out_buf.as_mut() else {
+                return Err(decode_error("the output buffer is not allocated"));
+            };
+            scaler
+                .run(buffer, output)
+                .map_err(|error| decode_error(format!("cannot scale the frame: {error:?}")))?;
+
+            let stride = output.stride(0);
+            let row_bytes = out_width as usize * 4;
+            let pixels = output.data(0);
+            let size = row_bytes * out_height as usize;
+
+            // The pixels are copied into the `Arc` directly: the frame is
+            // not copied twice (into a `Vec` and then into the `Arc`).
+            let rgba = if stride == row_bytes {
+                // The rows are packed: the whole plane is copied at once.
+                Arc::<[u8]>::from(&pixels[..size])
+            } else {
+                // The rows are padded: they are copied one by one into a
+                // buffer that is then shared.
+                let mut buffer = Vec::with_capacity(size);
+                for row in pixels.chunks(stride) {
+                    buffer.extend_from_slice(&row[..row_bytes]);
+                }
+                Arc::<[u8]>::from(buffer)
+            };
+
+            FramePixels::Rgba(rgba)
         };
 
         Ok(Some(VideoFrame {
-            width: out_width,
-            height: out_height,
+            width,
+            height,
             time,
             duration,
-            rgba,
+            pixels,
         }))
     }
 }
@@ -333,11 +382,16 @@ impl FrameDecoder for FfmpegBackend {
             .ictx
             .as_ref()
             .is_some_and(|context| context.streams().best(ffmpeg::media::Type::Audio).is_some());
-        let pixel_format = self
-            .src_format
-            .descriptor()
-            .map(|descriptor| descriptor.name().to_string())
-            .unwrap_or_default();
+        let pixel_format = if self.hands_out_yuv() {
+            // The planes of the decoded frame are handed out as they are.
+            self.src_format
+                .descriptor()
+                .map(|descriptor| descriptor.name().to_string())
+                .unwrap_or_default()
+        } else {
+            // The frames are converted into RGBA on the CPU.
+            "rgba8".to_string()
+        };
         let frame_count = if duration > 0.0 && self.fps > 0.0 {
             (duration * self.fps).round() as u32
         } else {
@@ -455,6 +509,89 @@ fn needs_more_data(error: &ffmpeg::Error) -> bool {
 /// Whether the error means "the end of the stream was reached".
 fn is_eof(error: &ffmpeg::Error) -> bool {
     matches!(error, ffmpeg::Error::Eof)
+}
+
+/// Whether a pixel format is a planar YUV 4:2:0 format.
+///
+/// The `yuvj420p` format is the deprecated name of the full range variant
+/// of `yuv420p`: the planes are the same.
+fn is_yuv420(format: ffmpeg::format::Pixel) -> bool {
+    matches!(
+        format,
+        ffmpeg::format::Pixel::YUV420P | ffmpeg::format::Pixel::YUVJ420P
+    )
+}
+
+/// The three planes of a decoded YUV 4:2:0 frame.
+struct YuvPlanes {
+    /// The luma plane: `width * height` bytes.
+    luma: Arc<[u8]>,
+    /// The blue difference chroma plane: `(width / 2) * (height / 2)` bytes.
+    blue: Arc<[u8]>,
+    /// The red difference chroma plane: `(width / 2) * (height / 2)` bytes.
+    red: Arc<[u8]>,
+}
+
+/// Copy the three planes of a decoded YUV 4:2:0 frame.
+///
+/// The rows of a plane can be padded: the padding is dropped, so that the
+/// planes are tightly packed and can be uploaded to the GPU as they are.
+fn extract_planes(buffer: &Frame) -> Result<YuvPlanes, VideoError> {
+    let width = buffer.width() as usize;
+    let height = buffer.height() as usize;
+    let chroma_width = width.div_ceil(2);
+    let chroma_height = height.div_ceil(2);
+
+    let luma = plane_from_rows(buffer.data(0), buffer.stride(0), width, height)
+        .ok_or_else(|| decode_error("cannot read the luma plane of the frame"))?;
+    let blue = plane_from_rows(
+        buffer.data(1),
+        buffer.stride(1),
+        chroma_width,
+        chroma_height,
+    )
+    .ok_or_else(|| decode_error("cannot read the U plane of the frame"))?;
+    let red = plane_from_rows(
+        buffer.data(2),
+        buffer.stride(2),
+        chroma_width,
+        chroma_height,
+    )
+    .ok_or_else(|| decode_error("cannot read the V plane of the frame"))?;
+
+    Ok(YuvPlanes { luma, blue, red })
+}
+
+/// The colour space of a decoded frame.
+///
+/// The information comes from the frame itself: the decoder fills it in
+/// from the bitstream (or from the codec context) when the container does
+/// not tell anything.  A frame that does not know anything is assumed to
+/// be BT.601 with the limited range, which is what the `swscale`
+/// conversion assumes as well.
+fn detect_colorspace(buffer: &Frame) -> YuvColorspace {
+    use ffmpeg::util::color::{Range, Space};
+
+    let matrix = match buffer.color_space() {
+        Space::BT709 | Space::BT2020NCL | Space::BT2020CL => YuvMatrix::Bt709,
+        _ => YuvMatrix::Bt601,
+    };
+
+    let range = match buffer.color_range() {
+        Range::JPEG => YuvRange::Full,
+        Range::MPEG => YuvRange::Limited,
+        // The range is unknown: the deprecated `yuvj420p` format is full
+        // range by definition, everything else is limited.
+        Range::Unspecified => {
+            if buffer.format() == ffmpeg::format::Pixel::YUVJ420P {
+                YuvRange::Full
+            } else {
+                YuvRange::Limited
+            }
+        }
+    };
+
+    YuvColorspace::new(matrix, range)
 }
 
 /// Build a decoding error.
