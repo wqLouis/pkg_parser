@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use image::codecs::gif::GifEncoder;
 use image::{Delay, Frame, RgbaImage};
 use pkg_parser::pkg_parser::video_parser::{
-    BackendKind, Video, VideoBackend, VideoError, VideoFormat, VideoFrame, VideoInfo, VideoPlayer,
+    BackendKind, FrameDecoder, Video, VideoError, VideoFormat, VideoFrame, VideoInfo, VideoPlayer,
     detect_format,
 };
 
@@ -55,7 +55,7 @@ impl MockBackend {
     }
 }
 
-impl VideoBackend for MockBackend {
+impl FrameDecoder for MockBackend {
     fn name(&self) -> &'static str {
         "mock"
     }
@@ -126,7 +126,7 @@ fn detect_format_recognises_the_containers() {
     assert_eq!(detect_format(&[]), None);
 }
 
-/// The player only talks to the [`VideoBackend`] trait, so any backend works.
+/// The player only talks to the [`FrameDecoder`] trait, so any backend works.
 ///
 /// This test runs with and without the `ffmpeg` cargo feature.
 #[test]

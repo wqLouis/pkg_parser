@@ -6,8 +6,8 @@
 //! * the *core* ([`backend`], [`info`], [`player`]) is plain Rust and does
 //!   not depend on any native library, so it can be compiled for
 //!   `wasm32-unknown-unknown` and run in a browser;
-//! * the *decoders* ([`GifBackend`], [`FfmpegBackend`]) implement the
-//!   [`VideoBackend`] trait and are plugged into the core.
+//! * the *decoders* ([`GifBackend`], [`ImageBackend`], [`FfmpegBackend`])
+//!   implement the [`FrameDecoder`] trait and are plugged into the core.
 //!
 //! The ffmpeg based decoder is only compiled when the `ffmpeg` cargo feature
 //! is enabled (it is on by default); it is the only place in the crate that
@@ -20,26 +20,56 @@ pub mod player;
 #[cfg(feature = "ffmpeg")]
 mod ffmpeg;
 mod gif;
+mod image;
 
 use std::io::Cursor;
+use std::sync::Arc;
 
-use image::{ImageBuffer, Rgba};
+// The module is called `image`, like the crate it decodes the pictures with:
+// the paths of the external crate have to be absolute to avoid the ambiguity.
+use ::image::{ImageBuffer, Rgba};
 
-pub use backend::{BackendKind, VideoBackend, detect_format};
+pub use backend::{BackendKind, FrameDecoder, VideoBackend, detect_format};
 #[cfg(feature = "ffmpeg")]
 pub use ffmpeg::FfmpegBackend;
 pub use gif::GifBackend;
+pub use image::{ImageBackend, ImageFormat, detect_image_format};
 pub use info::{VideoError, VideoFormat, VideoFrame, VideoInfo};
 pub use player::VideoPlayer;
+
+/// Pick the backend that can decode `bytes`, based on the container/format.
+///
+/// * an animated GIF is decoded by the pure Rust GIF backend,
+/// * a still image (png, jpeg, webp, bmp) by the pure Rust image backend,
+/// * an mp4/webm container by the ffmpeg backend.
+///
+/// The mp4/webm containers need the `ffmpeg` cargo feature: without it the
+/// function reports a [`VideoError::Unsupported`].
+pub fn backend_for(bytes: &[u8]) -> Result<Box<dyn FrameDecoder>, VideoError> {
+    match detect_format(bytes) {
+        Some(VideoFormat::Gif) => Ok(Box::new(GifBackend::new(Arc::from(bytes)))),
+        Some(VideoFormat::Mp4) | Some(VideoFormat::WebM) => ffmpeg_backend(Arc::from(bytes)),
+        Some(VideoFormat::Unknown(_)) => Err(VideoError::Unsupported(
+            "the container format is not supported".to_string(),
+        )),
+        None => {
+            if detect_image_format(bytes).is_some() {
+                Ok(Box::new(ImageBackend::new(Arc::from(bytes))))
+            } else {
+                Err(VideoError::Unsupported(
+                    "the data does not look like a video container or a still image".to_string(),
+                ))
+            }
+        }
+    }
+}
 
 /// Create the ffmpeg backend.
 ///
 /// Without the `ffmpeg` cargo feature the crate has no native decoder at all,
 /// so the caller gets an [`VideoError::Unsupported`] instead.
 #[cfg(feature = "ffmpeg")]
-pub(crate) fn ffmpeg_backend(
-    bytes: std::sync::Arc<[u8]>,
-) -> Result<Box<dyn VideoBackend>, VideoError> {
+pub(crate) fn ffmpeg_backend(bytes: Arc<[u8]>) -> Result<Box<dyn FrameDecoder>, VideoError> {
     Ok(Box::new(ffmpeg::FfmpegBackend::new(bytes)))
 }
 
@@ -48,9 +78,7 @@ pub(crate) fn ffmpeg_backend(
 /// Without the `ffmpeg` cargo feature the crate has no native decoder at all,
 /// so the caller gets an [`VideoError::Unsupported`] instead.
 #[cfg(not(feature = "ffmpeg"))]
-pub(crate) fn ffmpeg_backend(
-    _bytes: std::sync::Arc<[u8]>,
-) -> Result<Box<dyn VideoBackend>, VideoError> {
+pub(crate) fn ffmpeg_backend(_bytes: Arc<[u8]>) -> Result<Box<dyn FrameDecoder>, VideoError> {
     Err(VideoError::Unsupported(
         "this build of pkg_parser has no ffmpeg support; rebuild it with the `ffmpeg` feature"
             .to_string(),
@@ -121,8 +149,8 @@ impl Video {
 /// The `stem` should be the base file name without extension
 /// (e.g. "animation" for "animation.gif").
 pub fn save_gif_frames(bytes: &[u8], stem: &str) -> Option<Vec<(Vec<u8>, String)>> {
-    use image::AnimationDecoder;
-    use image::codecs::gif::GifDecoder;
+    use ::image::AnimationDecoder;
+    use ::image::codecs::gif::GifDecoder;
 
     let decoder = GifDecoder::new(Cursor::new(bytes)).ok()?;
     let frames = decoder.into_frames().collect_frames().ok()?;
@@ -135,7 +163,7 @@ pub fn save_gif_frames(bytes: &[u8], stem: &str) -> Option<Vec<(Vec<u8>, String)
         let mut png_buf = Vec::new();
         let mut cur = Cursor::new(&mut png_buf);
         ImageBuffer::<Rgba<u8>, Vec<u8>>::from_raw(w, h, rgba.into_raw())?
-            .write_to(&mut cur, image::ImageFormat::Png)
+            .write_to(&mut cur, ::image::ImageFormat::Png)
             .ok()?;
 
         results.push((png_buf, format!("{}_frame_{:04}.png", stem, i)));

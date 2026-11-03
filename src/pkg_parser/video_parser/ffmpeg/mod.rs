@@ -16,7 +16,7 @@ use ffmpeg_next::codec::decoder;
 use ffmpeg_next::util::frame::video::Video as Frame;
 use log::{debug, warn};
 
-use crate::pkg_parser::video_parser::backend::{VideoBackend, detect_format};
+use crate::pkg_parser::video_parser::backend::{FrameDecoder, detect_format};
 use crate::pkg_parser::video_parser::info::{VideoError, VideoFormat, VideoFrame, VideoInfo};
 
 /// How many packets are pulled from the demuxer at once.
@@ -298,7 +298,7 @@ impl FfmpegBackend {
     }
 }
 
-impl VideoBackend for FfmpegBackend {
+impl FrameDecoder for FfmpegBackend {
     fn name(&self) -> &'static str {
         "ffmpeg"
     }

@@ -1,6 +1,6 @@
 //! Backend agnostic frame scheduler.
 //!
-//! The player owns a [`VideoBackend`], maps a wall-clock time to a decoded
+//! The player owns a [`FrameDecoder`], maps a wall-clock time to a decoded
 //! frame and keeps a small cache of the most recently decoded frames so that
 //! the same frame can be served repeatedly without decoding it again.
 
@@ -9,9 +9,10 @@ use std::sync::Arc;
 
 use log::debug;
 
-use crate::pkg_parser::video_parser::backend::{BackendKind, VideoBackend, detect_format};
+use crate::pkg_parser::video_parser::backend::{BackendKind, FrameDecoder, detect_format};
 use crate::pkg_parser::video_parser::gif::GifBackend;
-use crate::pkg_parser::video_parser::info::{VideoError, VideoFormat, VideoFrame, VideoInfo};
+use crate::pkg_parser::video_parser::image::{ImageBackend, detect_image_format};
+use crate::pkg_parser::video_parser::info::{VideoError, VideoFrame, VideoInfo};
 
 /// Number of decoded frames kept around by default.
 const DEFAULT_CACHE_SIZE: usize = 4;
@@ -27,7 +28,7 @@ const TIME_EPSILON: f64 = 1e-6;
 /// caches recently decoded frames, and loops at the end of the stream.
 pub struct VideoPlayer {
     /// The decoder doing the actual work.
-    backend: Box<dyn VideoBackend>,
+    backend: Box<dyn FrameDecoder>,
     /// Container metadata, probed once when the player was opened.
     info: VideoInfo,
     /// Recently decoded frames, oldest first.
@@ -50,16 +51,18 @@ impl VideoPlayer {
     /// alternative backends, e.g. a WebCodecs bridge in a browser build).
     ///
     /// The backend owns the payload it decodes; `bytes` is only used to
-    /// validate that the data looks like a video container.
+    /// report the container of the data in the logs.
     pub fn open_with_backend(
         bytes: &[u8],
-        backend: Box<dyn VideoBackend>,
+        backend: Box<dyn FrameDecoder>,
     ) -> Result<Self, VideoError> {
         let format = detect_format(bytes);
+        let image_format = detect_image_format(bytes);
         debug!(
-            "opening a video with the `{}` backend (container: {:?})",
+            "opening a video with the `{}` backend (container: {:?}, image: {:?})",
             backend.name(),
-            format
+            format,
+            image_format
         );
 
         let mut backend = backend;
@@ -75,23 +78,27 @@ impl VideoPlayer {
     }
 
     /// Open `bytes` with an explicitly chosen backend kind.
+    ///
+    /// The data does not have to be a video container: a still image is
+    /// opened with the [`BackendKind::Image`] backend.
     pub fn open_with_backend_kind(bytes: &[u8], kind: BackendKind) -> Result<Self, VideoError> {
-        let format = detect_format(bytes).ok_or_else(|| {
-            VideoError::Unsupported("the data does not look like a video container".to_string())
-        })?;
-
-        let backend: Box<dyn VideoBackend> = match kind {
-            BackendKind::Auto => match format {
-                VideoFormat::Gif => Box::new(GifBackend::new(Arc::from(bytes))),
-                VideoFormat::Mp4 | VideoFormat::WebM => super::ffmpeg_backend(Arc::from(bytes))?,
-                VideoFormat::Unknown(_) => {
+        let backend: Box<dyn FrameDecoder> = match kind {
+            BackendKind::Auto => super::backend_for(bytes)?,
+            BackendKind::Gif => {
+                if detect_image_format(bytes).is_some() {
                     return Err(VideoError::Unsupported(
-                        "the container format is not supported".to_string(),
+                        "the data is a still image, not an animated GIF".to_string(),
                     ));
                 }
-            },
-            BackendKind::Gif => Box::new(GifBackend::new(Arc::from(bytes))),
+                Box::new(GifBackend::new(Arc::from(bytes)))
+            }
             BackendKind::Ffmpeg => super::ffmpeg_backend(Arc::from(bytes))?,
+            BackendKind::Image => {
+                if detect_image_format(bytes).is_none() {
+                    debug!("the data does not match a known image format");
+                }
+                Box::new(ImageBackend::new(Arc::from(bytes)))
+            }
         };
 
         Self::open_with_backend(bytes, backend)

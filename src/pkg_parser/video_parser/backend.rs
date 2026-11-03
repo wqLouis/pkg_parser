@@ -1,6 +1,6 @@
 //! The pluggable decoder interface.
 //!
-//! Every pixel decoder used by this crate implements [`VideoBackend`].  The
+//! Every pixel decoder used by this crate implements [`FrameDecoder`].  The
 //! trait is intentionally *sequential* (decode the next frame / rewind) so
 //! that any implementation — ffmpeg on native targets, a WebCodecs bridge in
 //! the browser — can satisfy it.  Random access is implemented by the player
@@ -8,12 +8,17 @@
 
 use crate::pkg_parser::video_parser::info::{VideoError, VideoFormat, VideoFrame, VideoInfo};
 
-/// A pluggable video decoding backend.
+/// A pluggable frame decoding backend.
+///
+/// The backend produces a stream of *frames*.  How many frames the stream
+/// holds depends on the implementation: a still image is a stream with
+/// exactly one frame, an animated GIF a handful of them and a video a full
+/// movie.
 ///
 /// The trait is intentionally *sequential* (decode the next frame / rewind) so that any
 /// implementation — ffmpeg on native targets, a WebCodecs bridge in the browser — can
 /// satisfy it. Random access is implemented by the player on top of it.
-pub trait VideoBackend {
+pub trait FrameDecoder {
     /// Short, stable identifier of the backend (e.g. `"ffmpeg"`, `"gif"`).
     fn name(&self) -> &'static str;
 
@@ -31,6 +36,13 @@ pub trait VideoBackend {
     fn set_output_size(&mut self, _width: u32, _height: u32) {}
 }
 
+/// The old, video specific name of [`FrameDecoder`].
+///
+/// The trait is not video specific any more: it also covers still images and
+/// animated images.  The alias is kept so that the code written against the
+/// old name (the browser backends, for instance) keeps compiling.
+pub use FrameDecoder as VideoBackend;
+
 /// Which backend to use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendKind {
@@ -40,6 +52,8 @@ pub enum BackendKind {
     Ffmpeg,
     /// Force the pure Rust GIF backend.
     Gif,
+    /// Force the pure Rust still image backend (png, jpeg, webp, …).
+    Image,
 }
 
 /// Detect the container format from the magic bytes.

@@ -11,7 +11,7 @@ use std::sync::Arc;
 use image::{AnimationDecoder, ImageDecoder, RgbaImage, codecs::gif::GifDecoder};
 use log::debug;
 
-use crate::pkg_parser::video_parser::backend::VideoBackend;
+use crate::pkg_parser::video_parser::backend::FrameDecoder;
 use crate::pkg_parser::video_parser::info::{VideoError, VideoFrame, VideoInfo};
 
 /// Pure-Rust GIF backend built on the `image` crate (no ffmpeg, wasm-friendly).
@@ -47,7 +47,7 @@ impl GifBackend {
     }
 }
 
-impl VideoBackend for GifBackend {
+impl FrameDecoder for GifBackend {
     fn name(&self) -> &'static str {
         "gif"
     }
