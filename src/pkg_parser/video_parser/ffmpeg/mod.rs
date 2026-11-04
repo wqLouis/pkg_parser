@@ -12,6 +12,7 @@ use std::io::Cursor;
 use std::sync::{Arc, OnceLock};
 
 use ffmpeg_next as ffmpeg;
+use ffmpeg_next::Discard;
 use ffmpeg_next::codec::decoder;
 use ffmpeg_next::util::frame::video::Video as Frame;
 use log::{debug, warn};
@@ -29,6 +30,17 @@ use crate::pkg_parser::video_parser::yuv::plane_from_rows;
 /// footprint low without re-creating the demuxer iterator for every frame.
 const PACKET_BATCH: usize = 32;
 
+/// The swscale context, in a wrapper that can be sent to another thread.
+///
+/// The context is a plain pointer to a `SwsContext`: it is used by the
+/// thread that owns the backend and by no other one, so moving the
+/// backend to the worker thread that decodes the frames is safe.
+struct Scaler(ffmpeg::software::scaling::Context);
+
+// SAFETY: the swscale context is only used by the thread that owns the
+// backend it belongs to; it is never shared between two threads.
+unsafe impl Send for Scaler {}
+
 /// ffmpeg-backed decoder. Owns the container bytes and re-opens the demuxer on `rewind`.
 pub struct FfmpegBackend {
     /// The raw container payload.
@@ -40,7 +52,7 @@ pub struct FfmpegBackend {
     /// The video decoder.
     decoder: Option<decoder::Video>,
     /// The swscale context converting the decoded frames to RGBA.
-    scaler: Option<ffmpeg::software::scaling::Context>,
+    scaler: Option<Scaler>,
     /// Buffer the decoder writes the decoded frames into.
     frame_buf: Option<Frame>,
     /// Buffer the scaler writes the RGBA frames into.
@@ -69,6 +81,11 @@ pub struct FfmpegBackend {
     eof_sent: bool,
     /// Fallback timestamp for the frames that carry no PTS.
     fallback_time: f64,
+    /// Whether the frames that are never shown have to be skipped.
+    ///
+    /// The option is remembered so that it can be applied to a decoder
+    /// that is opened later (a rewind opens a new one).
+    skip_unused_frames: bool,
 }
 
 impl FfmpegBackend {
@@ -103,6 +120,7 @@ impl FfmpegBackend {
             packets: VecDeque::new(),
             eof_sent: false,
             fallback_time: 0.0,
+            skip_unused_frames: false,
         }
     }
 
@@ -141,7 +159,7 @@ impl FfmpegBackend {
         let context = ffmpeg::codec::context::Context::from_parameters(parameters)
             .map_err(|error| decode_error(format!("cannot create the decoder: {error:?}")))?;
         // `video()` looks the codec up by its id and opens the decoder.
-        let decoder = context
+        let mut decoder = context
             .decoder()
             .video()
             .map_err(|error| decode_error(format!("cannot open the decoder: {error:?}")))?;
@@ -153,6 +171,12 @@ impl FfmpegBackend {
             .map(|rate| f64::from(rate.numerator()) / f64::from(rate.denominator()))
             .unwrap_or(0.0);
         let container_duration = ictx.duration();
+
+        // The frames that are never shown are not decoded at all when the
+        // skipping is on: the option has to be set on the new decoder.
+        if self.skip_unused_frames {
+            decoder.skip_frame(Discard::NonReference);
+        }
 
         self.ictx = Some(ictx);
         self.decoder = Some(decoder);
@@ -205,7 +229,7 @@ impl FfmpegBackend {
             out_width,
             out_height,
         ));
-        self.scaler = Some(
+        self.scaler = Some(Scaler(
             ffmpeg::software::scaling::Context::get(
                 self.src_format,
                 src_width,
@@ -216,7 +240,7 @@ impl FfmpegBackend {
                 ffmpeg::software::scaling::Flags::BILINEAR,
             )
             .map_err(|error| decode_error(format!("cannot create the scaler: {error:?}")))?,
-        );
+        ));
         Ok(())
     }
 
@@ -324,28 +348,19 @@ impl FfmpegBackend {
                 return Err(decode_error("the output buffer is not allocated"));
             };
             scaler
+                .0
                 .run(buffer, output)
                 .map_err(|error| decode_error(format!("cannot scale the frame: {error:?}")))?;
 
             let stride = output.stride(0);
             let row_bytes = out_width as usize * 4;
             let pixels = output.data(0);
-            let size = row_bytes * out_height as usize;
 
-            // The pixels are copied into the `Arc` directly: the frame is
-            // not copied twice (into a `Vec` and then into the `Arc`).
-            let rgba = if stride == row_bytes {
-                // The rows are packed: the whole plane is copied at once.
-                Arc::<[u8]>::from(&pixels[..size])
-            } else {
-                // The rows are padded: they are copied one by one into a
-                // buffer that is then shared.
-                let mut buffer = Vec::with_capacity(size);
-                for row in pixels.chunks(stride) {
-                    buffer.extend_from_slice(&row[..row_bytes]);
-                }
-                Arc::<[u8]>::from(buffer)
-            };
+            // The pixels are copied into the shared buffer directly: the
+            // frame is not copied twice (into a `Vec` and then into the
+            // `Arc`).
+            let rgba = plane_from_rows(pixels, stride, row_bytes, out_height as usize)
+                .ok_or_else(|| decode_error("cannot read the converted frame"))?;
 
             FramePixels::Rgba(rgba)
         };
@@ -481,6 +496,20 @@ impl FrameDecoder for FfmpegBackend {
             && let Err(error) = self.build_buffers()
         {
             warn!("cannot change the output size of the video: {error}");
+        }
+    }
+
+    fn set_frame_skipping(&mut self, enabled: bool) {
+        self.skip_unused_frames = enabled;
+
+        // The option is read by the decoder for every frame: it can be
+        // changed while the decoding is going on.
+        if let Some(decoder) = self.decoder.as_mut() {
+            decoder.skip_frame(if enabled {
+                Discard::NonReference
+            } else {
+                Discard::Default
+            });
         }
     }
 }

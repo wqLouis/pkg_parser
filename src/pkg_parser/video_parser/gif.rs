@@ -27,10 +27,22 @@ pub struct GifBackend {
     /// The raw GIF payload.
     bytes: Arc<[u8]>,
     /// The frame iterator; `None` until the stream is opened.
-    frames: Option<image::Frames<'static>>,
+    frames: Option<Frames>,
     /// Presentation time of the next frame, in seconds.
     time: f64,
 }
+
+/// The frame iterator of the GIF decoder.
+///
+/// The iterator of the `image` crate is not [`Send`] (it holds a trait
+/// object), but it is only ever used by the thread that owns the backend:
+/// the wrapper makes the backend movable to the worker thread that
+/// decodes the frames of a clip.
+struct Frames(image::Frames<'static>);
+
+// SAFETY: the frame iterator is only used by the thread that owns the
+// backend it belongs to; it is never shared between two threads.
+unsafe impl Send for Frames {}
 
 impl GifBackend {
     /// Create a backend for the given GIF payload.
@@ -91,14 +103,15 @@ impl FrameDecoder for GifBackend {
     fn next_frame(&mut self) -> Result<FrameStatus, VideoError> {
         if self.frames.is_none() {
             let decoder = self.decoder()?;
-            self.frames = Some(decoder.into_frames());
+            self.frames = Some(Frames(decoder.into_frames()));
             self.time = 0.0;
         }
 
-        let frames = self
+        let frames = &mut self
             .frames
             .as_mut()
-            .ok_or_else(|| VideoError::Decode("the GIF decoder is not open".to_string()))?;
+            .ok_or_else(|| VideoError::Decode("the GIF decoder is not open".to_string()))?
+            .0;
         let frame = match frames.next() {
             Some(frame) => frame.map_err(|error| {
                 VideoError::Decode(format!("cannot decode a GIF frame: {error}"))

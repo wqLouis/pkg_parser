@@ -39,6 +39,24 @@ pub trait FrameDecoder {
     /// Ask the backend to deliver frames scaled to this size (optional; backends may ignore it).
     /// Called before the first `next_frame`.
     fn set_output_size(&mut self, _width: u32, _height: u32) {}
+
+    /// Ask the backend to skip the frames that will never be shown
+    /// (optional; backends may ignore it).
+    ///
+    /// A clip that is recorded at 60 fps and shown at 30 fps holds half
+    /// of its frames for nothing: they are decoded and thrown away
+    /// right after.  A backend that can do something about it (the
+    /// ffmpeg one, whose decoder does not reconstruct the frames that
+    /// are not reference frames) does not decode them at all.
+    ///
+    /// The default implementation does nothing: the backends that cannot
+    /// skip anything (the GIF, the still image and the browser ones)
+    /// ignore the request.
+    ///
+    /// The frames that are skipped do not exist any more: their times
+    /// are simply not in the stream, and the caller has to pick the
+    /// frame that covers the time it asks for.
+    fn set_frame_skipping(&mut self, _enabled: bool) {}
 }
 
 /// The old, video specific name of [`FrameDecoder`].

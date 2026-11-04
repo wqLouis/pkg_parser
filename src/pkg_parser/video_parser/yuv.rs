@@ -21,6 +21,11 @@ use crate::pkg_parser::video_parser::info::{VideoError, YuvColorspace};
 /// larger than the width of the plane.  The rows are copied one by one
 /// here, so that the caller always gets a tightly packed plane.
 ///
+/// The buffer is allocated *once*, with the exact size of the plane, and
+/// the rows are copied into it: the plane is never copied twice.  (The
+/// buffer of the decoder is reused for the next frame, so the copy into
+/// the shared buffer cannot be avoided — but a second copy of it can.)
+///
 /// Returns `None` when the data is too short for the given geometry.
 pub fn plane_from_rows(
     data: &[u8],
@@ -50,13 +55,28 @@ pub fn plane_from_rows(
         return Some(Arc::from(&data[..size]));
     }
 
-    // The rows are padded: they are copied one by one into a buffer that
-    // is then shared.
-    let mut buffer = Vec::with_capacity(size);
-    for row in data.chunks(stride).take(height) {
-        buffer.extend_from_slice(&row[..width]);
+    // The rows are padded: the shared buffer is allocated once, with the
+    // exact size of the plane, and the rows are copied into it.
+    let mut buffer = Arc::<[u8]>::new_uninit_slice(size);
+    {
+        // The buffer was just created: nobody else holds it.
+        let bytes = Arc::get_mut(&mut buffer)?;
+        for (index, row) in data.chunks(stride).take(height).enumerate() {
+            let start = index * width;
+            // SAFETY: the row holds `width` bytes, the buffer holds
+            // `size` bytes and the two do not overlap.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    row.as_ptr(),
+                    bytes.as_mut_ptr().add(start).cast::<u8>(),
+                    width,
+                );
+            }
+        }
     }
-    Some(Arc::from(buffer))
+
+    // SAFETY: every byte of the buffer was written above.
+    Some(unsafe { buffer.assume_init() })
 }
 
 /// Convert the YUV 4:2:0 planes of a frame into tightly packed RGBA8.

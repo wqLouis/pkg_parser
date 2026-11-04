@@ -39,6 +39,13 @@ mod gif;
 mod still_image;
 #[cfg(target_arch = "wasm32")]
 mod web;
+// The worker thread that decodes the frames of a clip.
+//
+// There are no threads in a browser build, and the browser decodes the
+// videos asynchronously anyway: the worker only exists on the native
+// targets.
+#[cfg(not(target_arch = "wasm32"))]
+mod worker;
 
 use std::io::Cursor;
 use std::sync::Arc;
@@ -154,20 +161,6 @@ pub(crate) fn web_backend(
     }
 }
 
-/// Create one of the browser backends.
-///
-/// The browser backends only exist in a browser build: on the other
-/// targets the caller gets a [`VideoError::Unsupported`].
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn web_backend(
-    _kind: BackendKind,
-    _bytes: &[u8],
-) -> Result<Box<dyn FrameDecoder>, VideoError> {
-    Err(VideoError::Unsupported(
-        "the browser backends are only available in a browser build".to_string(),
-    ))
-}
-
 /// Create the ffmpeg backend.
 ///
 /// Without the `ffmpeg` cargo feature the crate has no native decoder at all,
@@ -183,6 +176,59 @@ pub(crate) fn ffmpeg_backend(bytes: Arc<[u8]>) -> Result<Box<dyn FrameDecoder>, 
 /// so the caller gets an [`VideoError::Unsupported`] instead.
 #[cfg(any(not(feature = "ffmpeg"), target_arch = "wasm32"))]
 pub(crate) fn ffmpeg_backend(_bytes: Arc<[u8]>) -> Result<Box<dyn FrameDecoder>, VideoError> {
+    Err(VideoError::Unsupported(
+        "this build of pkg_parser has no ffmpeg support; rebuild it with the `ffmpeg` feature"
+            .to_string(),
+    ))
+}
+
+/// Pick the backend that can decode `bytes` and that can be moved to
+/// another thread.
+///
+/// This is the native counterpart of [`backend_for`]: the native backends
+/// do not touch the browser, so they can be moved to the worker thread
+/// that decodes the frames of a clip.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn sendable_backend_for(
+    bytes: &[u8],
+) -> Result<Box<dyn FrameDecoder + Send>, VideoError> {
+    match detect_format(bytes) {
+        Some(VideoFormat::Gif) => Ok(Box::new(GifBackend::new(Arc::from(bytes)))),
+        Some(format) => match format {
+            VideoFormat::Mp4 | VideoFormat::WebM => sendable_ffmpeg_backend(Arc::from(bytes)),
+            _ => Err(VideoError::Unsupported(
+                "the container format is not supported".to_string(),
+            )),
+        },
+        None => {
+            if detect_image_format(bytes).is_some() {
+                Ok(Box::new(ImageBackend::new(Arc::from(bytes))))
+            } else {
+                Err(VideoError::Unsupported(
+                    "the data does not look like a video container or a still image".to_string(),
+                ))
+            }
+        }
+    }
+}
+
+/// Create the ffmpeg backend, as a decoder that can be moved to another
+/// thread.
+#[cfg(all(not(target_arch = "wasm32"), feature = "ffmpeg"))]
+pub(crate) fn sendable_ffmpeg_backend(
+    bytes: Arc<[u8]>,
+) -> Result<Box<dyn FrameDecoder + Send>, VideoError> {
+    Ok(Box::new(ffmpeg::FfmpegBackend::new(bytes)))
+}
+
+/// Create the ffmpeg backend.
+///
+/// Without the `ffmpeg` cargo feature the crate has no native decoder at all,
+/// so the caller gets a [`VideoError::Unsupported`] instead.
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "ffmpeg")))]
+pub(crate) fn sendable_ffmpeg_backend(
+    _bytes: Arc<[u8]>,
+) -> Result<Box<dyn FrameDecoder + Send>, VideoError> {
     Err(VideoError::Unsupported(
         "this build of pkg_parser has no ffmpeg support; rebuild it with the `ffmpeg` feature"
             .to_string(),
